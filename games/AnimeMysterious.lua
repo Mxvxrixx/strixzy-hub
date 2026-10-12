@@ -75,9 +75,17 @@ pcall(function()
     end
 end)
 
+if getgenv().STRIX_HUB_CLEANUP then
+    pcall(getgenv().STRIX_HUB_CLEANUP)
+end
+
 local isScriptRunning = true
 getgenv().STRIX_HUB_CLEANUP = function()
     isScriptRunning = false
+    if getgenv().STRIX_ANTI_AFK_CON then
+        pcall(function() getgenv().STRIX_ANTI_AFK_CON:Disconnect() end)
+        getgenv().STRIX_ANTI_AFK_CON = nil
+    end
     if getgenv().STRIX_MOBILE_GUI then
         pcall(function()
             if getgenv().STRIX_MOBILE_GUI.Parent then
@@ -570,6 +578,56 @@ if isfile(earlyTarget) then
         if type(earlyData.SelectedGemsItems) == "table" then State.SelectedGemsItems = earlyData.SelectedGemsItems end
         if earlyData.AutoBuyGold ~= nil then State.AutoBuyGold = (earlyData.AutoBuyGold == true) end
         if type(earlyData.SelectedGoldItems) == "table" then State.SelectedGoldItems = earlyData.SelectedGoldItems end
+
+        -- Pre-load Gameplay / Event Automations
+        if earlyData.AutoSolveFateSword ~= nil then State.AutoSolveFateSword = (earlyData.AutoSolveFateSword ~= false) end
+        if earlyData.AutoDefendMoneyUnits ~= nil then State.AutoDefendMoneyUnits = (earlyData.AutoDefendMoneyUnits ~= false) end
+    end
+end
+
+local isLoadingConfig = true
+local saveDebounce = false
+local lastUserGameSettingChangeTime = 0
+
+local function ResolveBool(stateVal, diskVal, defaultVal)
+    if stateVal ~= nil then
+        return (stateVal == true)
+    elseif diskVal ~= nil then
+        return (diskVal == true)
+    else
+        return (defaultVal == true)
+    end
+end
+
+local function ResolveString(stateVal, diskVal, defaultVal)
+    if stateVal ~= nil and stateVal ~= "" then
+        return tostring(stateVal)
+    elseif diskVal ~= nil and diskVal ~= "" then
+        return tostring(diskVal)
+    else
+        return defaultVal or ""
+    end
+end
+
+local function ResolveMap(stateVal, diskVal, defaultVal)
+    if stateVal ~= nil and stateVal ~= "" and stateVal ~= "None" then
+        return tostring(stateVal)
+    elseif diskVal ~= nil and diskVal ~= "" and diskVal ~= "None" then
+        return tostring(diskVal)
+    else
+        return defaultVal or ""
+    end
+end
+
+local function ResolveItemList(stateVal, diskVal)
+    if type(stateVal) == "table" and (not isBattlePlace or #stateVal > 0) then
+        return stateVal
+    elseif type(diskVal) == "table" and #diskVal > 0 then
+        return diskVal
+    elseif type(stateVal) == "table" then
+        return stateVal
+    else
+        return {}
     end
 end
 
@@ -578,85 +636,73 @@ local function SaveConfig()
     EnsureFolders()
 
     local diskData = {}
-    if isfile(ConfigFile) then
-        local ok, dec = pcall(function() return HttpService:JSONDecode(readfile(ConfigFile)) end)
+    local readTarget = ConfigFile
+    if not isfile(readTarget) then
+        local oldTarget = ConfigFolder .. "/" .. tostring(LocalPlayer.UserId) .. ".json"
+        if isfile(oldTarget) then
+            readTarget = oldTarget
+        end
+    end
+    if isfile(readTarget) then
+        local ok, dec = pcall(function() return HttpService:JSONDecode(readfile(readTarget)) end)
         if ok and type(dec) == "table" then
             diskData = dec
         end
     end
 
-    local function SafePick(stateVal, diskVal, isTable)
-        if isTable then
-            if type(stateVal) == "table" and #stateVal > 0 then
-                return stateVal
-            elseif isBattlePlace and type(diskVal) == "table" and #diskVal > 0 then
-                return diskVal
-            end
-            return stateVal or {}
-        else
-            if stateVal ~= nil and stateVal ~= "" and stateVal ~= "None" then
-                return stateVal
-            elseif isBattlePlace and diskVal ~= nil and diskVal ~= "" and diskVal ~= "None" then
-                return diskVal
-            elseif diskVal ~= nil and diskVal ~= "" and diskVal ~= "None" and (stateVal == nil or stateVal == "") then
-                return diskVal
-            end
-            return stateVal
-        end
-    end
-
     local payload = {
-        ActiveAutoCreate = SafePick(State.ActiveAutoCreate, diskData.ActiveAutoCreate, false),
-        StoryMap = SafePick(State.StoryMap, diskData.StoryMap, false),
-        StoryStage = SafePick(State.StoryStage, diskData.StoryStage, false),
-        StoryDiff = SafePick(State.StoryDiff, diskData.StoryDiff, false),
-        MysteriousMap = SafePick(State.MysteriousMap, diskData.MysteriousMap, false),
-        MysteriousStage = SafePick(State.MysteriousStage, diskData.MysteriousStage, false),
-        MysteriousDiff = SafePick(State.MysteriousDiff, diskData.MysteriousDiff, false),
-        RaidsMap = SafePick(State.RaidsMap, diskData.RaidsMap, false),
-        RaidsStage = SafePick(State.RaidsStage, diskData.RaidsStage, false),
-        RaidsDiff = SafePick(State.RaidsDiff, diskData.RaidsDiff, false),
-        BossMap = SafePick(State.BossMap, diskData.BossMap, false),
-        BossStage = SafePick(State.BossStage, diskData.BossStage, false),
-        BossDiff = SafePick(State.BossDiff, diskData.BossDiff, false),
-        AutoStart = (State.AutoStart ~= nil) and State.AutoStart or (diskData.AutoStart == true),
-        AutoChallenges = (State.AutoChallenges ~= nil) and State.AutoChallenges or (diskData.AutoChallenges == true),
-        AutoLeaveChallenge = (State.AutoLeaveChallenge ~= nil) and State.AutoLeaveChallenge or (diskData.AutoLeaveChallenge == true),
-        AutoLeaveOnChallengeReset = (State.AutoLeaveOnChallengeReset ~= nil) and State.AutoLeaveOnChallengeReset or (diskData.AutoLeaveOnChallengeReset == true),
-        TargetChallenges = (State.TargetChallenges and next(State.TargetChallenges)) and State.TargetChallenges or diskData.TargetChallenges or { Weekly = true, Daily = true, Regular = true },
-        AutoSummon = (State.AutoSummon ~= nil) and State.AutoSummon or (diskData.AutoSummon == true),
-        SummonBanner = SafePick(State.SummonBanner, diskData.SummonBanner, false),
-        SummonAmount = SafePick(State.SummonAmount, diskData.SummonAmount, false),
-        AutoBuyGems = (State.AutoBuyGems ~= nil) and State.AutoBuyGems or (diskData.AutoBuyGems == true),
-        SelectedGemsItems = SafePick(State.SelectedGemsItems, diskData.SelectedGemsItems, true),
-        AutoBuyGold = (State.AutoBuyGold ~= nil) and State.AutoBuyGold or (diskData.AutoBuyGold == true),
-        SelectedGoldItems = SafePick(State.SelectedGoldItems, diskData.SelectedGoldItems, true),
+        ActiveAutoCreate = ResolveString(State.ActiveAutoCreate, diskData.ActiveAutoCreate, "None"),
+        StoryMap = ResolveMap(State.StoryMap, diskData.StoryMap, GameData.Story.Maps[1] or ""),
+        StoryStage = ResolveString(State.StoryStage, diskData.StoryStage, "1"),
+        StoryDiff = ResolveString(State.StoryDiff, diskData.StoryDiff, "Normal"),
+        MysteriousMap = ResolveMap(State.MysteriousMap, diskData.MysteriousMap, GameData.Mysterious.Maps[1] or ""),
+        MysteriousStage = ResolveString(State.MysteriousStage, diskData.MysteriousStage, "1"),
+        MysteriousDiff = ResolveString(State.MysteriousDiff, diskData.MysteriousDiff, "Normal"),
+        RaidsMap = ResolveMap(State.RaidsMap, diskData.RaidsMap, GameData.Raids.Maps[1] or ""),
+        RaidsStage = ResolveString(State.RaidsStage, diskData.RaidsStage, "1"),
+        RaidsDiff = ResolveString(State.RaidsDiff, diskData.RaidsDiff, "Normal"),
+        BossMap = ResolveMap(State.BossMap, diskData.BossMap, GameData.Boss.Maps[1] or ""),
+        BossStage = ResolveString(State.BossStage, diskData.BossStage, "1"),
+        BossDiff = ResolveString(State.BossDiff, diskData.BossDiff, "Normal"),
+        AutoStart = ResolveBool(State.AutoStart, diskData.AutoStart, false),
+        AutoChallenges = ResolveBool(State.AutoChallenges, diskData.AutoChallenges, false),
+        AutoLeaveChallenge = ResolveBool(State.AutoLeaveChallenge, diskData.AutoLeaveChallenge, false),
+        AutoLeaveOnChallengeReset = ResolveBool(State.AutoLeaveOnChallengeReset, diskData.AutoLeaveOnChallengeReset, false),
+        TargetChallenges = (type(State.TargetChallenges) == "table") and State.TargetChallenges or (type(diskData.TargetChallenges) == "table" and diskData.TargetChallenges or { Weekly = true, Daily = true, Regular = true }),
+        AutoSummon = ResolveBool(State.AutoSummon, diskData.AutoSummon, false),
+        SummonBanner = ResolveString(State.SummonBanner, diskData.SummonBanner, "Standard"),
+        SummonAmount = ResolveString(State.SummonAmount, diskData.SummonAmount, "10x"),
+        AutoBuyGems = ResolveBool(State.AutoBuyGems, diskData.AutoBuyGems, false),
+        SelectedGemsItems = ResolveItemList(State.SelectedGemsItems, diskData.SelectedGemsItems),
+        AutoBuyGold = ResolveBool(State.AutoBuyGold, diskData.AutoBuyGold, false),
+        SelectedGoldItems = ResolveItemList(State.SelectedGoldItems, diskData.SelectedGoldItems),
         Keybind = typeof(State.Keybind) == "EnumItem" and State.Keybind.Name or (type(State.Keybind) == "string" and State.Keybind or (diskData.Keybind or "RightControl")),
         UISize = State.UISize or diskData.UISize or { Width = 868, Height = 650 },
-        AcrylicBlur = (State.AcrylicBlur ~= nil) and State.AcrylicBlur or (diskData.AcrylicBlur ~= false),
-        ShowUserInfo = (State.ShowUserInfo ~= nil) and State.ShowUserInfo or (diskData.ShowUserInfo ~= false),
-        MobileToggle = (State.MobileToggle ~= nil) and State.MobileToggle or (diskData.MobileToggle ~= false),
-        AutoPlay = (State.AutoPlay ~= nil) and State.AutoPlay or (diskData.AutoPlay ~= false),
-        AutoNext = (State.AutoNext ~= nil) and State.AutoNext or (diskData.AutoNext ~= false),
-        AutoReplay = (State.AutoReplay ~= nil) and State.AutoReplay or (diskData.AutoReplay ~= false),
-        AutoVoteStart = (State.AutoVoteStart ~= nil) and State.AutoVoteStart or (diskData.AutoVoteStart ~= false),
-        AutoWaveSkipping = (State.AutoWaveSkipping ~= nil) and State.AutoWaveSkipping or (diskData.AutoWaveSkipping ~= false),
-        AutoMaxGameSpeed = (State.AutoMaxGameSpeed ~= nil) and State.AutoMaxGameSpeed or (diskData.AutoMaxGameSpeed ~= false),
-        AutoUltimate = (State.AutoUltimate ~= nil) and State.AutoUltimate or (diskData.AutoUltimate ~= false),
-        AutoSolveFateSword = (State.AutoSolveFateSword ~= nil) and State.AutoSolveFateSword or (diskData.AutoSolveFateSword ~= false),
-        AutoDefendMoneyUnits = (State.AutoDefendMoneyUnits ~= nil) and State.AutoDefendMoneyUnits or (diskData.AutoDefendMoneyUnits ~= false)
+        AcrylicBlur = ResolveBool(State.AcrylicBlur, diskData.AcrylicBlur, true),
+        ShowUserInfo = ResolveBool(State.ShowUserInfo, diskData.ShowUserInfo, true),
+        MobileToggle = ResolveBool(State.MobileToggle, diskData.MobileToggle, true),
+        AutoPlay = ResolveBool(State.AutoPlay, diskData.AutoPlay, true),
+        AutoNext = ResolveBool(State.AutoNext, diskData.AutoNext, true),
+        AutoReplay = ResolveBool(State.AutoReplay, diskData.AutoReplay, true),
+        AutoVoteStart = ResolveBool(State.AutoVoteStart, diskData.AutoVoteStart, true),
+        AutoWaveSkipping = ResolveBool(State.AutoWaveSkipping, diskData.AutoWaveSkipping, true),
+        AutoMaxGameSpeed = ResolveBool(State.AutoMaxGameSpeed, diskData.AutoMaxGameSpeed, true),
+        AutoUltimate = ResolveBool(State.AutoUltimate, diskData.AutoUltimate, true),
+        AutoSolveFateSword = ResolveBool(State.AutoSolveFateSword, diskData.AutoSolveFateSword, true),
+        AutoDefendMoneyUnits = ResolveBool(State.AutoDefendMoneyUnits, diskData.AutoDefendMoneyUnits, true)
     }
-    local encoded = HttpService:JSONEncode(payload)
-    pcall(writefile, ConfigFile, encoded)
+
+    local okEnc, encoded = pcall(function() return HttpService:JSONEncode(payload) end)
+    if okEnc and encoded then
+        pcall(writefile, ConfigFile, encoded)
+    end
 end
 
-local isLoadingConfig = false
-local saveDebounce = false
 local function SaveConfigDebounced()
     if not isScriptRunning or isLoadingConfig then return end
     if saveDebounce then return end
     saveDebounce = true
-    task.delay(0.5, function()
+    task.delay(0.3, function()
         saveDebounce = false
         if isScriptRunning and not isLoadingConfig then
             SaveConfig()
@@ -669,13 +715,15 @@ task.spawn(function()
     while isScriptRunning do
         task.wait(10)
         if not isScriptRunning then break end
-        SaveConfig()
+        if not isLoadingConfig then
+            SaveConfig()
+        end
     end
 end)
 
 pcall(function()
     game:BindToClose(function()
-        if isScriptRunning then
+        if isScriptRunning and not isLoadingConfig then
             isScriptRunning = false
             pcall(SaveConfig)
         end
@@ -686,21 +734,102 @@ end)
 local function SafeClick(button)
     if not button then return end
     if firesignal then
+        pcall(firesignal, button.MouseButton1Down)
         pcall(firesignal, button.MouseButton1Click)
+        pcall(firesignal, button.MouseButton1Up)
         pcall(firesignal, button.Activated)
-        return
     end
     if getconnections then
-        pcall(function()
-            for _, conn in ipairs(getconnections(button.MouseButton1Click) or {}) do
-                conn:Fire()
+        local sigNames = { "MouseButton1Click", "Activated", "MouseButton1Down", "MouseButton1Up" }
+        for _, sigName in ipairs(sigNames) do
+            local sig = button[sigName]
+            if sig then
+                pcall(function()
+                    for _, conn in ipairs(getconnections(sig) or {}) do
+                        if conn.Fire then
+                            pcall(function() conn:Fire() end)
+                        elseif conn.Function then
+                            pcall(conn.Function, button)
+                        end
+                    end
+                end)
             end
-            for _, conn in ipairs(getconnections(button.Activated) or {}) do
-                conn:Fire()
+        end
+    end
+end
+
+--// Anti-AFK & Game 18-Minute Idle Bypass System
+local antiAfkCon = getgenv().STRIX_ANTI_AFK_CON
+local localPlayer = game:GetService("Players").LocalPlayer
+
+if getconnections then
+    for _, c in getconnections(localPlayer.Idled) do
+        pcall(function() c:Disable() end)
+        pcall(function() c:Disconnect() end)
+    end
+end
+
+if antiAfkCon then
+    pcall(function() antiAfkCon:Disconnect() end)
+    getgenv().STRIX_ANTI_AFK_CON = nil
+end
+
+local function SendAntiAfkInput()
+    pcall(function()
+        local VirtualInputManager = Instance.new("VirtualInputManager")
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+        VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+        VirtualInputManager:Destroy()
+    end)
+end
+
+antiAfkCon = localPlayer.Idled:Connect(function()
+    SendAntiAfkInput()
+end)
+getgenv().STRIX_ANTI_AFK_CON = antiAfkCon
+print("Anti-AFK System Enabled!")
+
+-- Bypass in-game 18-minute auto-rejoin (AntiAFKController & AFKRejoinRequest)
+pcall(function()
+    local ps = localPlayer:FindFirstChild("PlayerScripts")
+    local ctrl = ps and ps:FindFirstChild("AntiAFKController")
+    if ctrl then
+        ctrl.Disabled = true
+    end
+end)
+
+pcall(function()
+    local ps = localPlayer:WaitForChild("PlayerScripts", 5)
+    if ps then
+        ps.ChildAdded:Connect(function(child)
+            if child.Name == "AntiAFKController" then
+                task.wait(0.1)
+                pcall(function() child.Disabled = true end)
             end
         end)
     end
+end)
+
+if hookmetamethod and getnamecallmethod and not getgenv().STRIX_AFK_REJOIN_HOOKED then
+    local oldNamecall
+    oldNamecall = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+        local method = getnamecallmethod()
+        if (method == "FireServer" or method == "fireServer") and tostring(self) == "AFKRejoinRequest" then
+            return nil
+        end
+        return oldNamecall(self, ...)
+    end))
+    getgenv().STRIX_AFK_REJOIN_HOOKED = true
 end
+
+-- Periodic activity heartbeat (Every 5 minutes to keep internal activity timers reset)
+task.spawn(function()
+    while isScriptRunning do
+        task.wait(300)
+        if not isScriptRunning then break end
+        SendAntiAfkInput()
+    end
+end)
 
 --// In-Game Gameplay Settings Controller (Two-way Sync with PlayerGui.Settings & SettingModule)
 local isSyncingFromGame = false
@@ -758,8 +887,11 @@ local function SetupGameSettingsSync()
         while isScriptRunning do
             task.wait(1.0)
             if not isScriptRunning then break end
+            if isLoadingConfig then continue end
+            if os.clock() - lastUserGameSettingChangeTime < 2.5 then continue end
+
             for _, sInfo in ipairs(GameSettingsMap) do
-                if not isScriptRunning then break end
+                if not isScriptRunning or isLoadingConfig then break end
                 local currentInGame = GetGameSetting(sInfo.GuiName, sInfo.SettingKey)
                 if currentInGame ~= nil and State[sInfo.StateKey] ~= currentInGame and not isSyncingFromGame then
                     isSyncingFromGame = true
@@ -768,7 +900,9 @@ local function SetupGameSettingsSync()
                         pcall(function() MacLib.Options[sInfo.OptFlag]:UpdateState(currentInGame) end)
                     end
                     isSyncingFromGame = false
-                    SaveConfigDebounced()
+                    if not isLoadingConfig then
+                        SaveConfigDebounced()
+                    end
                 end
             end
         end
@@ -776,12 +910,107 @@ local function SetupGameSettingsSync()
 end
 SetupGameSettingsSync()
 
-local function IsRoomCreated()
-    local PlayGUI = LocalPlayer.PlayerGui:FindFirstChild("PlayGUI")
-    if PlayGUI and PlayGUI:FindFirstChild("PlayFrame") and PlayGUI.PlayFrame.Visible then
-        return true
+local function GetRoomModeFromMap(mapName)
+    if not mapName or mapName == "" then return "Story" end
+    local cleanName = string.gsub(mapName, "%s*%[.-%]", "")
+    local cClean = string.lower(cleanName)
+    for _, mc in ipairs(MapConfig) do
+        if mc.Name and string.lower(mc.Name) == cClean then
+            return mc.Mode or "Story"
+        end
+        if mc.MapToCreate and string.lower(mc.MapToCreate) == cClean then
+            return mc.Mode or "Story"
+        end
     end
-    return false
+    return (PlayModule and PlayModule.SessionMode) or "Story"
+end
+
+local function GetCurrentRoomInfo()
+    local PlayGUI = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("PlayGUI")
+    if not (PlayGUI and PlayGUI.Enabled) then
+        return nil
+    end
+    local pf = PlayGUI:FindFirstChild("PlayFrame")
+    if not (pf and pf.Visible) then
+        return nil
+    end
+    local sdf = pf:FindFirstChild("Details") and pf.Details:FindFirstChild("ShowDetailsFrame")
+    local mapName = sdf and sdf:FindFirstChild("MAPNAME") and sdf.MAPNAME.Text or ""
+    local stageText = sdf and sdf:FindFirstChild("STAGE") and sdf.STAGE.Text or ""
+    local diffText = sdf and sdf:FindFirstChild("Diff") and sdf.Diff.Text or ""
+    local playBtn = pf:FindFirstChild("ContainerBtn") and pf.ContainerBtn:FindFirstChild("PlayBtn")
+    
+    if mapName == "" or mapName == "Waiting for Host..." or stageText == "" or stageText == "..." then
+        return nil
+    end
+    
+    local stageNum = tonumber(string.match(stageText, "%d+")) or 1
+    local mode = GetRoomModeFromMap(mapName)
+    
+    return {
+        Gui = PlayGUI,
+        Frame = pf,
+        MapName = mapName,
+        StageText = stageText,
+        StageNum = stageNum,
+        Diff = diffText,
+        Mode = mode,
+        IsHost = (PlayModule and PlayModule.isHost == true),
+        PlayBtn = playBtn,
+        IsTeleporting = (playBtn and playBtn.Text == "Teleporting...")
+    }
+end
+
+local function IsRoomCreated()
+    local info = GetCurrentRoomInfo()
+    return info ~= nil
+end
+
+local function DoesRoomMatch(targetMode, targetMapName, targetStage, targetDiff)
+    local room = GetCurrentRoomInfo()
+    if not room then return false end
+    
+    local cleanTargetMap = string.gsub(targetMapName or "", "%s*%[.-%]", "")
+    local cleanRoomMap = string.gsub(room.MapName or "", "%s*%[.-%]", "")
+    
+    local targetStageNum = tonumber(targetStage) or 1
+    local targetDiffStr = string.lower(tostring(targetDiff or "Normal"))
+    
+    -- Check map match (case-insensitive and trimmed)
+    local cR = string.lower(cleanRoomMap)
+    local cT = string.lower(cleanTargetMap)
+    local mapMatches = (cR == cT) or (string.find(cR, cT, 1, true) ~= nil) or (string.find(cT, cR, 1, true) ~= nil)
+    if not mapMatches then return false end
+    
+    -- Check stage match
+    local stageMatches = (room.StageNum == targetStageNum)
+    if not stageMatches then return false end
+    
+    -- Check difficulty match
+    local roomDiffStr = string.lower(tostring(room.Diff or "Normal"))
+    local diffMatches = (roomDiffStr == targetDiffStr)
+    if not diffMatches then return false end
+    
+    -- Check mode match
+    local rMode = string.lower(tostring(room.Mode or ""))
+    local tMode = string.lower(tostring(targetMode or ""))
+    if rMode == tMode then return true end
+    if (rMode == "mysterios" or rMode == "mysterious") and (tMode == "mysterios" or tMode == "mysterious") then return true end
+    if (rMode == "boss" or rMode == "event") and (tMode == "boss" or tMode == "event") then return true end
+    if (rMode == "challange" or rMode == "challenge") and (tMode == "challange" or tMode == "challenge") then return true end
+    
+    -- Verify against MapConfig mode definitions
+    for _, mc in ipairs(MapConfig) do
+        if mc.Name and string.lower(mc.Name) == cT then
+            local mcMode = string.lower(tostring(mc.Mode or ""))
+            if mcMode == tMode or ((mcMode == "boss" or mcMode == "event") and (tMode == "boss" or tMode == "event"))
+                or ((mcMode == "mysterios" or mcMode == "mysterious") and (tMode == "mysterios" or tMode == "mysterious")) then
+                return true
+            end
+        end
+    end
+    
+    return true
 end
 
 local ProcessAutoChallenges
@@ -1289,18 +1518,18 @@ end)
 
 --// Helper: Player Data Replica Retrieval
 local function GetReplicaData()
-    if PlayModule and PlayModule.Replica and PlayModule.Replica.Data then
+    if PlayModule and type(PlayModule) == "table" and type(PlayModule.Replica) == "table" and type(PlayModule.Replica.Data) == "table" then
         return PlayModule.Replica.Data
     end
-    if _G.PlayerDataReplica and _G.PlayerDataReplica.Data then
+    if _G.PlayerDataReplica and type(_G.PlayerDataReplica) == "table" and type(_G.PlayerDataReplica.Data) == "table" then
         return _G.PlayerDataReplica.Data
     end
     local ok, rc = pcall(function()
         return require(ReplicatedStorage.ReplicaLib.ReplicatedStorage.ReplicaController)
     end)
-    if ok and rc and rc._replicas then
+    if ok and type(rc) == "table" and rc._replicas then
         for _, rep in pairs(rc._replicas) do
-            if rep.Class == "PlayerData" and rep.Data then
+            if type(rep) == "table" and rep.Class == "PlayerData" and type(rep.Data) == "table" then
                 return rep.Data
             end
         end
@@ -1363,22 +1592,17 @@ local function CreateRoom(mode, mapDisplayName, stage, difficulty, forceRecreate
     local stageNum = tonumber(stage) or 1
     local diff = difficulty or "Normal"
     
-    -- Feature 3: In-place update if room already exists
+    -- If room already exists and matches what we want, no need to recreate
     if IsRoomCreated() then
-        if not forceRecreate then
-            pcall(function()
-                if UpdateLobbySettings then
-                    UpdateLobbySettings:FireServer(cleanName, tostring(stageNum), {}, diff, mapId, mode)
-                end
-            end)
-            return true, "Room updated in-place"
-        else
-            pcall(function()
-                if LeaveLobbyEvent then LeaveLobbyEvent:FireServer() end
-                if PlayModule and PlayModule.CloseModule then PlayModule.CloseModule() end
-            end)
-            task.wait(0.25)
+        if DoesRoomMatch(mode, cleanName, stageNum, diff) and not forceRecreate then
+            return true, "Room already matches"
         end
+        -- Otherwise room is wrong or force requested: leave and reset cleanly
+        pcall(function()
+            if LeaveLobbyEvent then LeaveLobbyEvent:FireServer() end
+            if PlayModule and PlayModule.CloseModule then PlayModule.CloseModule() end
+        end)
+        task.wait(0.35)
     end
     
     -- Feature 2: Stage Unlock Validation
@@ -1399,12 +1623,14 @@ local function CreateRoom(mode, mapDisplayName, stage, difficulty, forceRecreate
     
     -- Feature 3: Request Lobby Creation & Open Target Map
     pcall(function()
-        if not (PlayModule and PlayModule.isHost == true) and RequestJoinLobby then
+        if RequestJoinLobby then
             RequestJoinLobby:InvokeServer("Create")
         end
     end)
+    task.wait(0.2)
     
     if PlayModule then
+        PlayModule.SessionMode = mode
         PlayModule.isHost = true
         if PlayModule.OpenTargetMap then
             pcall(function()
@@ -1413,7 +1639,7 @@ local function CreateRoom(mode, mapDisplayName, stage, difficulty, forceRecreate
         end
     end
     
-    task.wait(0.25)
+    task.wait(0.35)
     
     -- Feature 3: Select Difficulty button on SelectPlayer UI (Normal / Hard / Nightmare)
     pcall(function()
@@ -1441,45 +1667,61 @@ local function CreateRoom(mode, mapDisplayName, stage, difficulty, forceRecreate
         end
     end)
     
+    task.wait(0.25)
+    
     -- Feature 3: Direct sync to guarantee PlayFrame is opened and server state matches
     pcall(function()
         if not enteredPlayFrame and PlayModule and PlayModule.OpenPlayFrame then
-            pcall(function() PlayModule.OpenPlayFrame() end)
+            PlayModule.OpenPlayFrame()
         end
         if UpdateLobbySettings then
             UpdateLobbySettings:FireServer(cleanName, tostring(stageNum), {}, diff, mapId, mode)
         end
     end)
     
-    return true
+    local t0 = os.clock()
+    while (os.clock() - t0 < 1.0) do
+        if IsRoomCreated() then break end
+        task.wait(0.1)
+    end
+    
+    return IsRoomCreated()
 end
 
 --// Feature 4: Dual-Trigger Match Start & Teleport Reliability
+local lastMatchStartTrigger = 0
 local function TriggerMatchStart(overrideMode, overrideMap, overrideStage, overrideDiff)
-    local PlayGUI = LocalPlayer.PlayerGui:FindFirstChild("PlayGUI")
-    local pf = PlayGUI and PlayGUI:FindFirstChild("PlayFrame")
-    if not (pf and pf.Visible) then return false, "No active room" end
-    
-    if not PlayGUI.Enabled then
-        PlayGUI.Enabled = true
+    if os.clock() - lastMatchStartTrigger < 2.0 then
+        return false, "Debounce"
     end
     
-    -- Extract mode, map, stage, difficulty
-    local mode = overrideMode
-    local mapName = overrideMap
-    local stage = overrideStage
-    local diff = overrideDiff
+    local room = GetCurrentRoomInfo()
+    if not room then return false, "No active room" end
     
-    local sdf = pf:FindFirstChild("Details") and pf.Details:FindFirstChild("ShowDetailsFrame")
-    if sdf then
-        mapName = mapName or (sdf:FindFirstChild("MAPNAME") and sdf.MAPNAME.Text)
-        local stageText = sdf:FindFirstChild("STAGE") and sdf.STAGE.Text
-        if stageText then
-            stage = stage or string.match(stageText, "%d+") or "1"
-        end
-        diff = diff or (sdf:FindFirstChild("Diff") and sdf.Diff.Text)
+    if room.IsTeleporting then
+        return true, "Already teleporting"
     end
-    mode = mode or (PlayModule and PlayModule.SessionMode)
+    
+    if room.Gui and not room.Gui.Enabled then
+        room.Gui.Enabled = true
+    end
+    
+    if PlayModule then
+        PlayModule.isHost = true
+    end
+    
+    -- 1. Click in-game PlayBtn in PlayFrame if present
+    local playBtn = room.PlayBtn
+    if playBtn and playBtn.Visible and playBtn.Text ~= "Teleporting..." then
+        playBtn.Interactable = true
+        SafeClick(playBtn)
+    end
+    
+    -- 2. Extract and resolve mode, map, stage, difficulty for dual-trigger remote
+    local mode = overrideMode or room.Mode
+    local mapName = overrideMap or room.MapName
+    local stage = overrideStage or room.StageNum
+    local diff = overrideDiff or room.Diff
     
     -- Fallback to State if still missing
     if not mode or mode == "" then
@@ -1513,31 +1755,14 @@ local function TriggerMatchStart(overrideMode, overrideMap, overrideStage, overr
     local stageNum = tonumber(stage) or 1
     local diffStr = diff or "Normal"
     
-    -- Feature 2: Validate unlock before starting
-    if mapId and mode then
-        local isUnlocked, reason = ValidateMapAndStage(mapId, stageNum, mode)
-        if not isUnlocked then
-            warn(string.format("[STRIX HUB] Cannot start locked match: %s", tostring(reason)))
-            return false, reason
-        end
-    end
-    
-    -- 1. Click in-game PlayBtn in PlayFrame if present
-    local playBtn = pf:FindFirstChild("ContainerBtn") and pf.ContainerBtn:FindFirstChild("PlayBtn")
-    if playBtn and playBtn.Visible and playBtn.Text ~= "Teleporting..." then
-        SafeClick(playBtn)
-    end
-    
-    -- 2. Direct TeleportRequest firing (Dual-Trigger failsafe)
+    -- 3. Direct TeleportRequest firing (Dual-Trigger failsafe to battle place 97246719761307)
     if TeleportRequest and mapId and mode then
-        pcall(function()
-            TeleportRequest:FireServer(107610426295102, mode, mapId, tostring(stageNum), diffStr)
-        end)
         pcall(function()
             TeleportRequest:FireServer(97246719761307, mode, mapId, tostring(stageNum), diffStr)
         end)
     end
     
+    lastMatchStartTrigger = os.clock()
     return true
 end
 
@@ -2312,6 +2537,9 @@ Sections.MatchStart:Toggle({
     Callback = function(val)
         State.AutoStart = val
         SaveConfigDebounced()
+        if val and IsRoomCreated() then
+            task.spawn(TriggerMatchStart)
+        end
     end
 }, "Toggle_AutoStart")
 
@@ -2383,9 +2611,9 @@ local ChallengeInfoLabel = ChallengeSections.Info:Label({ Text = "Checking chall
 
 local function UpdateChallengeInfoDisplay()
     local ok, data = pcall(function() return GetChallengeData:InvokeServer() end)
-    if ok and data then
-        local replica = PlayModule.Replica or _G.PlayerDataReplica
-        local cleared = replica and replica.Data and replica.Data.ClearedChallenges or {}
+    if ok and type(data) == "table" then
+        local repData = GetReplicaData()
+        local cleared = (type(repData) == "table" and repData.ClearedChallenges) or {}
         
         local text = ""
         for _, modeName in ipairs({ "Weekly", "Daily", "Regular" }) do
@@ -2395,7 +2623,9 @@ local function UpdateChallengeInfoDisplay()
                 text = text .. string.format("[%s] %s (Stage %s) - %s\n", modeName, ch.MapName or ch.MapToCreate, tostring(ch.StageName), isCleared and "CLEARED" or "AVAILABLE")
             end
         end
-        ChallengeInfoLabel:UpdateName(text)
+        if ChallengeInfoLabel and ChallengeInfoLabel.UpdateName then
+            pcall(function() ChallengeInfoLabel:UpdateName(text) end)
+        end
     end
 end
 
@@ -2420,6 +2650,7 @@ for _, sInfo in ipairs(GameSettingsMap) do
         Name = sInfo.Label,
         Default = State[sInfo.StateKey],
         Callback = function(val)
+            lastUserGameSettingChangeTime = os.clock()
             State[sInfo.StateKey] = val
             SaveConfigDebounced()
             if not isSyncingFromGame then
@@ -2874,10 +3105,10 @@ ProcessAutoChallenges = function()
     
     -- Case 2: Fetch challenge data and find uncleared target challenge
     local ok, challengeData = pcall(function() return GetChallengeData:InvokeServer() end)
-    if not (ok and challengeData) then return false end
+    if not (ok and type(challengeData) == "table") then return false end
     
-    local replica = PlayModule and PlayModule.Replica or _G.PlayerDataReplica or GetReplicaData()
-    local cleared = (replica and replica.Data and replica.Data.ClearedChallenges) or (replica and replica.ClearedChallenges) or {}
+    local repData = GetReplicaData()
+    local cleared = (type(repData) == "table" and repData.ClearedChallenges) or {}
     
     -- Priority sequence: Weekly > Daily > Regular
     local priorityList = { "Weekly", "Daily", "Regular" }
@@ -2967,9 +3198,6 @@ ProcessAutoChallenges = function()
             -- 2. Direct TeleportRequest firing (Dual-Trigger failsafe)
             if TeleportRequest then
                 pcall(function()
-                    TeleportRequest:FireServer(107610426295102, modeTitle, cInfo.MapToCreate, stageName, "Nightmare")
-                end)
-                pcall(function()
                     TeleportRequest:FireServer(97246719761307, modeTitle, cInfo.MapToCreate, stageName, "Nightmare")
                 end)
             end
@@ -2982,17 +3210,44 @@ ProcessAutoChallenges = function()
     return true
 end
 
+local lastAutoCreateAttempt = 0
+local lastSuccessfulRoomCreation = 0
 local function ProcessAutoCreate()
-    if IsRoomCreated() then return end
+    if os.clock() - lastAutoCreateAttempt < 4.0 then
+        return
+    end
     
+    local mode, mapName, stage, diff
     if State.ActiveAutoCreate == "Story" then
-        CreateRoom("Story", State.StoryMap, State.StoryStage, State.StoryDiff)
+        mode, mapName, stage, diff = "Story", State.StoryMap, State.StoryStage, State.StoryDiff
     elseif State.ActiveAutoCreate == "Mysterious" then
-        CreateRoom("Mysterios", State.MysteriousMap, State.MysteriousStage, State.MysteriousDiff)
+        mode, mapName, stage, diff = "Mysterios", State.MysteriousMap, State.MysteriousStage, State.MysteriousDiff
     elseif State.ActiveAutoCreate == "Raids" then
-        CreateRoom("Raids", State.RaidsMap, State.RaidsStage, State.RaidsDiff)
+        mode, mapName, stage, diff = "Raids", State.RaidsMap, State.RaidsStage, State.RaidsDiff
     elseif State.ActiveAutoCreate == "Boss" then
-        CreateRoom("Event", State.BossMap, State.BossStage, State.BossDiff)
+        mode, mapName, stage, diff = "Event", State.BossMap, State.BossStage, State.BossDiff
+    else
+        return
+    end
+    
+    if not mapName or mapName == "" then return end
+    
+    -- If room already created and matches target configuration, no need to recreate
+    if DoesRoomMatch(mode, mapName, stage, diff) then
+        return
+    end
+    
+    -- Cooldown: if a room was created within the last 6 seconds and is active, do not recreate
+    if os.clock() - lastSuccessfulRoomCreation < 6.0 and IsRoomCreated() then
+        return
+    end
+    
+    lastAutoCreateAttempt = os.clock()
+    
+    -- Call CreateRoom without forcing blind recreation (CreateRoom checks DoesRoomMatch)
+    local ok = CreateRoom(mode, mapName, stage, diff, false)
+    if ok then
+        lastSuccessfulRoomCreation = os.clock()
     end
 end
 
@@ -3006,9 +3261,9 @@ local function GetAutoSellSettings()
     end
     
     -- 2. Try from PlayerDataReplica.Data.Config
-    local replica = _G.PlayerDataReplica or (PlayModule and PlayModule.Replica)
-    if replica and replica.Data and replica.Data.Config then
-        local config = replica.Data.Config
+    local repData = GetReplicaData()
+    if type(repData) == "table" and repData.Config then
+        local config = repData.Config
         local sellSettings = {
             Common = false,
             Rare = false,
@@ -3188,52 +3443,51 @@ task.spawn(function()
     while isScriptRunning do
         task.wait(1)
         if not isScriptRunning then break end
-        -- Priority 1: Auto Buy
-        local didBuy = false
-        if State.AutoBuyGems or State.AutoBuyGold then
-            didBuy = ProcessAutoBuy()
-        end
-        
-        if not didBuy then
-            -- Auto Solve Fate Swords (In Gameplay)
-            if isBattlePlace and State.AutoSolveFateSword and workspace:GetAttribute("SwordEventActive") == true then
+        if isLobby then
+            -- Priority 1: Auto Buy
+            local didBuy = false
+            if State.AutoBuyGems or State.AutoBuyGold then
+                didBuy = ProcessAutoBuy()
+            end
+            
+            if not didBuy then
+                -- Priority 2: Auto Challenges
+                local challengeActive = false
+                if State.AutoChallenges then
+                    challengeActive = ProcessAutoChallenges()
+                end
+                
+                -- Priority 3: Auto Create (Only if challenges not active/completed)
+                if not challengeActive and State.ActiveAutoCreate ~= "None" then
+                    ProcessAutoCreate()
+                end
+            end
+            
+            -- Auto Start (Checks if room is created and starts match)
+            if State.AutoStart and IsRoomCreated() then
+                TriggerMatchStart()
+            end
+            
+            -- Auto Summon
+            if State.AutoSummon then
+                ProcessAutoSummon()
+            end
+        else
+            -- Battle-only operations (In Gameplay)
+            if State.AutoSolveFateSword and workspace:GetAttribute("SwordEventActive") == true then
                 SolveFateSwordEvent()
             end
 
-            -- Auto Defend Money Units (In Gameplay)
-            if isBattlePlace and State.AutoDefendMoneyUnits then
+            if State.AutoDefendMoneyUnits then
                 HandleAutoDefendMoneyUnits()
             end
 
-            -- Auto Leave Challenge (In Gameplay)
             if State.AutoLeaveChallenge then
                 CheckAndExecuteAutoLeave()
             end
             if State.AutoLeaveOnChallengeReset then
                 CheckChallengeResetLeave()
             end
-            
-            -- Priority 2: Auto Challenges
-            local challengeActive = false
-            if State.AutoChallenges then
-                challengeActive = ProcessAutoChallenges()
-            end
-            
-            -- Priority 3: Auto Create (Only if challenges not active/completed)
-            if not challengeActive and State.ActiveAutoCreate ~= "None" then
-                ProcessAutoCreate()
-            end
-        end
-        
-        -- Auto Start (Checks if room is created and starts match)
-        if State.AutoStart and IsRoomCreated() then
-            task.wait(0.5)
-            TriggerMatchStart()
-        end
-        
-        -- Auto Summon
-        if State.AutoSummon then
-            ProcessAutoSummon()
         end
     end
 end)
@@ -3243,186 +3497,190 @@ end)
 -- ====================================================================
 LoadConfig = function()
     isLoadingConfig = true
-    EnsureFolders()
-    local targetFile = ConfigFile
-    if not isfile(targetFile) then
-        local oldFile = ConfigFolder .. "/" .. tostring(LocalPlayer.UserId) .. ".json"
-        if isfile(oldFile) then
-            targetFile = oldFile
+    local okMain, mainErr = pcall(function()
+        EnsureFolders()
+        local targetFile = ConfigFile
+        if not isfile(targetFile) then
+            local oldFile = ConfigFolder .. "/" .. tostring(LocalPlayer.UserId) .. ".json"
+            if isfile(oldFile) then
+                targetFile = oldFile
+            end
         end
-    end
-    if isfile(targetFile) then
+        if not isfile(targetFile) then return end
+
         local content = readfile(targetFile)
         local ok, data = pcall(function() return HttpService:JSONDecode(content) end)
-        if ok and type(data) == "table" then
-            if data.ActiveAutoCreate then
-                SetAutoCreateMode(data.ActiveAutoCreate)
-            end
-            local function CleanMapName(name)
-                if not name then return nil end
-                return string.gsub(name, "%s*%[.-%]", "")
-            end
+        if not (ok and type(data) == "table") then return end
 
-            if data.StoryMap then
-                local sm = CleanMapName(data.StoryMap)
-                State.StoryMap = sm
-                if MacLib.Options["Dropdown_StoryMap"] then
-                    MacLib.Options["Dropdown_StoryMap"]:UpdateSelection(sm)
-                end
+        if data.ActiveAutoCreate then
+            pcall(function() SetAutoCreateMode(data.ActiveAutoCreate) end)
+        end
+        local function CleanMapName(name)
+            if not name then return nil end
+            return string.gsub(name, "%s*%[.-%]", "")
+        end
+
+        if data.StoryMap then
+            local sm = CleanMapName(data.StoryMap)
+            State.StoryMap = sm
+            if MacLib.Options["Dropdown_StoryMap"] then
+                pcall(function() MacLib.Options["Dropdown_StoryMap"]:UpdateSelection(sm) end)
             end
-            if data.StoryStage then
-                State.StoryStage = tostring(data.StoryStage)
-                if MacLib.Options["Dropdown_StoryStage"] then
-                    MacLib.Options["Dropdown_StoryStage"]:UpdateSelection(tostring(data.StoryStage))
-                end
+        end
+        if data.StoryStage then
+            State.StoryStage = tostring(data.StoryStage)
+            if MacLib.Options["Dropdown_StoryStage"] then
+                pcall(function() MacLib.Options["Dropdown_StoryStage"]:UpdateSelection(tostring(data.StoryStage)) end)
             end
-            if data.StoryDiff then
-                State.StoryDiff = data.StoryDiff
-                if MacLib.Options["Dropdown_StoryDiff"] then
-                    MacLib.Options["Dropdown_StoryDiff"]:UpdateSelection(data.StoryDiff)
-                end
+        end
+        if data.StoryDiff then
+            State.StoryDiff = data.StoryDiff
+            if MacLib.Options["Dropdown_StoryDiff"] then
+                pcall(function() MacLib.Options["Dropdown_StoryDiff"]:UpdateSelection(data.StoryDiff) end)
             end
-            if data.MysteriousMap then
-                local mm = CleanMapName(data.MysteriousMap)
-                State.MysteriousMap = mm
-                if MacLib.Options["Dropdown_MysteriousMap"] then
-                    MacLib.Options["Dropdown_MysteriousMap"]:UpdateSelection(mm)
-                end
+        end
+        if data.MysteriousMap then
+            local mm = CleanMapName(data.MysteriousMap)
+            State.MysteriousMap = mm
+            if MacLib.Options["Dropdown_MysteriousMap"] then
+                pcall(function() MacLib.Options["Dropdown_MysteriousMap"]:UpdateSelection(mm) end)
             end
-            if data.MysteriousStage then
-                State.MysteriousStage = tostring(data.MysteriousStage)
-                if MacLib.Options["Dropdown_MysteriousStage"] then
-                    MacLib.Options["Dropdown_MysteriousStage"]:UpdateSelection(tostring(data.MysteriousStage))
-                end
+        end
+        if data.MysteriousStage then
+            State.MysteriousStage = tostring(data.MysteriousStage)
+            if MacLib.Options["Dropdown_MysteriousStage"] then
+                pcall(function() MacLib.Options["Dropdown_MysteriousStage"]:UpdateSelection(tostring(data.MysteriousStage)) end)
             end
-            if data.MysteriousDiff then
-                State.MysteriousDiff = data.MysteriousDiff
-                if MacLib.Options["Dropdown_MysteriousDiff"] then
-                    MacLib.Options["Dropdown_MysteriousDiff"]:UpdateSelection(data.MysteriousDiff)
-                end
+        end
+        if data.MysteriousDiff then
+            State.MysteriousDiff = data.MysteriousDiff
+            if MacLib.Options["Dropdown_MysteriousDiff"] then
+                pcall(function() MacLib.Options["Dropdown_MysteriousDiff"]:UpdateSelection(data.MysteriousDiff) end)
             end
-            if data.RaidsMap then
-                local rm = CleanMapName(data.RaidsMap)
-                State.RaidsMap = rm
-                if MacLib.Options["Dropdown_RaidsMap"] then
-                    MacLib.Options["Dropdown_RaidsMap"]:UpdateSelection(rm)
-                end
+        end
+        if data.RaidsMap then
+            local rm = CleanMapName(data.RaidsMap)
+            State.RaidsMap = rm
+            if MacLib.Options["Dropdown_RaidsMap"] then
+                pcall(function() MacLib.Options["Dropdown_RaidsMap"]:UpdateSelection(rm) end)
             end
-            if data.RaidsStage then
-                State.RaidsStage = tostring(data.RaidsStage)
-                if MacLib.Options["Dropdown_RaidsStage"] then
-                    MacLib.Options["Dropdown_RaidsStage"]:UpdateSelection(tostring(data.RaidsStage))
-                end
+        end
+        if data.RaidsStage then
+            State.RaidsStage = tostring(data.RaidsStage)
+            if MacLib.Options["Dropdown_RaidsStage"] then
+                pcall(function() MacLib.Options["Dropdown_RaidsStage"]:UpdateSelection(tostring(data.RaidsStage)) end)
             end
-            if data.RaidsDiff then
-                State.RaidsDiff = data.RaidsDiff
-                if MacLib.Options["Dropdown_RaidsDiff"] then
-                    MacLib.Options["Dropdown_RaidsDiff"]:UpdateSelection(data.RaidsDiff)
-                end
+        end
+        if data.RaidsDiff then
+            State.RaidsDiff = data.RaidsDiff
+            if MacLib.Options["Dropdown_RaidsDiff"] then
+                pcall(function() MacLib.Options["Dropdown_RaidsDiff"]:UpdateSelection(data.RaidsDiff) end)
             end
-            if data.BossMap then
-                local bm = CleanMapName(data.BossMap)
-                State.BossMap = bm
-                if MacLib.Options["Dropdown_BossMap"] then
-                    MacLib.Options["Dropdown_BossMap"]:UpdateSelection(bm)
-                end
+        end
+        if data.BossMap then
+            local bm = CleanMapName(data.BossMap)
+            State.BossMap = bm
+            if MacLib.Options["Dropdown_BossMap"] then
+                pcall(function() MacLib.Options["Dropdown_BossMap"]:UpdateSelection(bm) end)
             end
-            if data.BossStage then
-                State.BossStage = tostring(data.BossStage)
-                if MacLib.Options["Dropdown_BossStage"] then
-                    MacLib.Options["Dropdown_BossStage"]:UpdateSelection(tostring(data.BossStage))
-                end
+        end
+        if data.BossStage then
+            State.BossStage = tostring(data.BossStage)
+            if MacLib.Options["Dropdown_BossStage"] then
+                pcall(function() MacLib.Options["Dropdown_BossStage"]:UpdateSelection(tostring(data.BossStage)) end)
             end
-            if data.BossDiff then
-                State.BossDiff = data.BossDiff
-                if MacLib.Options["Dropdown_BossDiff"] then
-                    MacLib.Options["Dropdown_BossDiff"]:UpdateSelection(data.BossDiff)
-                end
+        end
+        if data.BossDiff then
+            State.BossDiff = data.BossDiff
+            if MacLib.Options["Dropdown_BossDiff"] then
+                pcall(function() MacLib.Options["Dropdown_BossDiff"]:UpdateSelection(data.BossDiff) end)
             end
-            if data.AutoStart ~= nil and MacLib.Options["Toggle_AutoStart"] then
-                MacLib.Options["Toggle_AutoStart"]:UpdateState(data.AutoStart)
-            end
-            if data.AutoChallenges ~= nil and MacLib.Options["Toggle_AutoChallenges"] then
-                MacLib.Options["Toggle_AutoChallenges"]:UpdateState(data.AutoChallenges)
-            end
-            if data.AutoLeaveChallenge ~= nil and MacLib.Options["Toggle_AutoLeaveChallenge"] then
-                MacLib.Options["Toggle_AutoLeaveChallenge"]:UpdateState(data.AutoLeaveChallenge)
-            end
-            if data.AutoLeaveOnChallengeReset ~= nil and MacLib.Options["Toggle_AutoLeaveOnChallengeReset"] then
-                MacLib.Options["Toggle_AutoLeaveOnChallengeReset"]:UpdateState(data.AutoLeaveOnChallengeReset)
-            end
-            if data.TargetChallenges and MacLib.Options["Dropdown_TargetChallenges"] then
-                local selected = {}
-                if type(data.TargetChallenges) == "table" then
-                    for k, v in pairs(data.TargetChallenges) do
-                        if v == true and type(k) == "string" then
-                            table.insert(selected, k)
-                        elseif type(v) == "string" then
-                            table.insert(selected, v)
-                        end
-                    end
-                end
-                MacLib.Options["Dropdown_TargetChallenges"]:UpdateSelection(selected)
-            end
-            if data.AutoBuyGems ~= nil and MacLib.Options["Toggle_AutoBuyGems"] then
-                MacLib.Options["Toggle_AutoBuyGems"]:UpdateState(data.AutoBuyGems)
-            end
-            if data.SelectedGemsItems and MacLib.Options["Dropdown_GemsItems"] then
-                local labelsToSelect = {}
-                State.SelectedGemsItems = data.SelectedGemsItems or {}
-                if type(data.SelectedGemsItems) == "table" then
-                    for _, idOrLabel in ipairs(data.SelectedGemsItems) do
-                        local lbl = GameData.GemsIdToLabel[idOrLabel]
-                        if lbl then
-                            table.insert(labelsToSelect, lbl)
-                        elseif GameData.GemsItemMap[idOrLabel] then
-                            table.insert(labelsToSelect, idOrLabel)
-                        end
-                    end
-                end
-                MacLib.Options["Dropdown_GemsItems"]:UpdateSelection(labelsToSelect)
-            end
-            if data.AutoBuyGold ~= nil and MacLib.Options["Toggle_AutoBuyGold"] then
-                MacLib.Options["Toggle_AutoBuyGold"]:UpdateState(data.AutoBuyGold)
-            end
-            if data.SelectedGoldItems and MacLib.Options["Dropdown_GoldItems"] then
-                local labelsToSelect = {}
-                State.SelectedGoldItems = data.SelectedGoldItems or {}
-                if type(data.SelectedGoldItems) == "table" then
-                    for _, idOrLabel in ipairs(data.SelectedGoldItems) do
-                        local lbl = GameData.GoldIdToLabel[idOrLabel]
-                        if lbl then
-                            table.insert(labelsToSelect, lbl)
-                        elseif GameData.GoldItemMap[idOrLabel] then
-                            table.insert(labelsToSelect, idOrLabel)
-                        end
-                    end
-                end
-                MacLib.Options["Dropdown_GoldItems"]:UpdateSelection(labelsToSelect)
-            end
-            if data.AutoSummon ~= nil and MacLib.Options["Toggle_AutoSummon"] then
-                MacLib.Options["Toggle_AutoSummon"]:UpdateState(data.AutoSummon)
-            end
-            if data.SummonBanner and MacLib.Options["Dropdown_SummonBanner"] then
-                MacLib.Options["Dropdown_SummonBanner"]:UpdateSelection(data.SummonBanner)
-            end
-            if data.SummonAmount and MacLib.Options["Dropdown_SummonAmount"] then
-                MacLib.Options["Dropdown_SummonAmount"]:UpdateSelection(data.SummonAmount)
-            end
-            if data.Keybind then
-                local k = ResolveBind(data.Keybind)
-                if k and k ~= Enum.KeyCode.Unknown then
-                    State.Keybind = k
-                    if Window and Window.SetKeybind then
-                        Window:SetKeybind(k)
-                    end
-                    if MacLib.Options["Keybind_ToggleUI"] then
-                        MacLib.Options["Keybind_ToggleUI"]:Bind(k)
+        end
+        if data.AutoStart ~= nil and MacLib.Options["Toggle_AutoStart"] then
+            pcall(function() MacLib.Options["Toggle_AutoStart"]:UpdateState(data.AutoStart) end)
+        end
+        if data.AutoChallenges ~= nil and MacLib.Options["Toggle_AutoChallenges"] then
+            pcall(function() MacLib.Options["Toggle_AutoChallenges"]:UpdateState(data.AutoChallenges) end)
+        end
+        if data.AutoLeaveChallenge ~= nil and MacLib.Options["Toggle_AutoLeaveChallenge"] then
+            pcall(function() MacLib.Options["Toggle_AutoLeaveChallenge"]:UpdateState(data.AutoLeaveChallenge) end)
+        end
+        if data.AutoLeaveOnChallengeReset ~= nil and MacLib.Options["Toggle_AutoLeaveOnChallengeReset"] then
+            pcall(function() MacLib.Options["Toggle_AutoLeaveOnChallengeReset"]:UpdateState(data.AutoLeaveOnChallengeReset) end)
+        end
+        if data.TargetChallenges and MacLib.Options["Dropdown_TargetChallenges"] then
+            local selected = {}
+            if type(data.TargetChallenges) == "table" then
+                for k, v in pairs(data.TargetChallenges) do
+                    if v == true and type(k) == "string" then
+                        table.insert(selected, k)
+                    elseif type(v) == "string" then
+                        table.insert(selected, v)
                     end
                 end
             end
-            if data.UISize and data.UISize.Width and data.UISize.Height then
-                State.UISize = data.UISize
+            pcall(function() MacLib.Options["Dropdown_TargetChallenges"]:UpdateSelection(selected) end)
+        end
+        if data.AutoBuyGems ~= nil and MacLib.Options["Toggle_AutoBuyGems"] then
+            pcall(function() MacLib.Options["Toggle_AutoBuyGems"]:UpdateState(data.AutoBuyGems) end)
+        end
+        if data.SelectedGemsItems and MacLib.Options["Dropdown_GemsItems"] then
+            local labelsToSelect = {}
+            State.SelectedGemsItems = data.SelectedGemsItems or {}
+            if type(data.SelectedGemsItems) == "table" then
+                for _, idOrLabel in ipairs(data.SelectedGemsItems) do
+                    local lbl = GameData.GemsIdToLabel[idOrLabel]
+                    if lbl then
+                        table.insert(labelsToSelect, lbl)
+                    elseif GameData.GemsItemMap[idOrLabel] then
+                        table.insert(labelsToSelect, idOrLabel)
+                    end
+                end
+            end
+            pcall(function() MacLib.Options["Dropdown_GemsItems"]:UpdateSelection(labelsToSelect) end)
+        end
+        if data.AutoBuyGold ~= nil and MacLib.Options["Toggle_AutoBuyGold"] then
+            pcall(function() MacLib.Options["Toggle_AutoBuyGold"]:UpdateState(data.AutoBuyGold) end)
+        end
+        if data.SelectedGoldItems and MacLib.Options["Dropdown_GoldItems"] then
+            local labelsToSelect = {}
+            State.SelectedGoldItems = data.SelectedGoldItems or {}
+            if type(data.SelectedGoldItems) == "table" then
+                for _, idOrLabel in ipairs(data.SelectedGoldItems) do
+                    local lbl = GameData.GoldIdToLabel[idOrLabel]
+                    if lbl then
+                        table.insert(labelsToSelect, lbl)
+                    elseif GameData.GoldItemMap[idOrLabel] then
+                        table.insert(labelsToSelect, idOrLabel)
+                    end
+                end
+            end
+            pcall(function() MacLib.Options["Dropdown_GoldItems"]:UpdateSelection(labelsToSelect) end)
+        end
+        if data.AutoSummon ~= nil and MacLib.Options["Toggle_AutoSummon"] then
+            pcall(function() MacLib.Options["Toggle_AutoSummon"]:UpdateState(data.AutoSummon) end)
+        end
+        if data.SummonBanner and MacLib.Options["Dropdown_SummonBanner"] then
+            pcall(function() MacLib.Options["Dropdown_SummonBanner"]:UpdateSelection(data.SummonBanner) end)
+        end
+        if data.SummonAmount and MacLib.Options["Dropdown_SummonAmount"] then
+            pcall(function() MacLib.Options["Dropdown_SummonAmount"]:UpdateSelection(data.SummonAmount) end)
+        end
+        if data.Keybind then
+            local k = ResolveBind(data.Keybind)
+            if k and k ~= Enum.KeyCode.Unknown then
+                State.Keybind = k
+                if Window and Window.SetKeybind then
+                    pcall(function() Window:SetKeybind(k) end)
+                end
+                if MacLib.Options["Keybind_ToggleUI"] then
+                    pcall(function() MacLib.Options["Keybind_ToggleUI"]:Bind(k) end)
+                end
+            end
+        end
+        if data.UISize and data.UISize.Width and data.UISize.Height then
+            State.UISize = data.UISize
+            pcall(function()
                 local parent = (gethui and gethui()) or game:GetService("CoreGui")
                 for _, v in ipairs(parent:GetChildren()) do
                     if v:IsA("ScreenGui") and v:FindFirstChild("Base") then
@@ -3438,47 +3696,57 @@ LoadConfig = function()
                         break
                     end
                 end
-            end
-            if data.AcrylicBlur ~= nil and MacLib.Options["Toggle_AcrylicBlur"] then
+            end)
+        end
+        if data.AcrylicBlur ~= nil and MacLib.Options["Toggle_AcrylicBlur"] then
+            pcall(function()
                 MacLib.Options["Toggle_AcrylicBlur"]:UpdateState(data.AcrylicBlur)
                 if Window and Window.SetAcrylicBlurState then
                     Window:SetAcrylicBlurState(data.AcrylicBlur)
                 end
-            end
-            if data.ShowUserInfo ~= nil and MacLib.Options["Toggle_ShowUserInfo"] then
+            end)
+        end
+        if data.ShowUserInfo ~= nil and MacLib.Options["Toggle_ShowUserInfo"] then
+            pcall(function()
                 MacLib.Options["Toggle_ShowUserInfo"]:UpdateState(data.ShowUserInfo)
                 if Window and Window.SetUserInfoState then
                     Window:SetUserInfoState(data.ShowUserInfo)
                 end
-            end
-            if data.MobileToggle ~= nil and MacLib.Options["Toggle_MobileToggle"] then
+            end)
+        end
+        if data.MobileToggle ~= nil and MacLib.Options["Toggle_MobileToggle"] then
+            pcall(function()
                 MacLib.Options["Toggle_MobileToggle"]:UpdateState(data.MobileToggle)
                 if getgenv().STRIX_MOBILE_GUI then
                     getgenv().STRIX_MOBILE_GUI.Enabled = data.MobileToggle
                 end
-            end
-            for _, sInfo in ipairs(GameSettingsMap) do
-                if data[sInfo.StateKey] ~= nil and MacLib.Options[sInfo.OptFlag] then
+            end)
+        end
+        for _, sInfo in ipairs(GameSettingsMap) do
+            if data[sInfo.StateKey] ~= nil and MacLib.Options[sInfo.OptFlag] then
+                pcall(function()
                     MacLib.Options[sInfo.OptFlag]:UpdateState(data[sInfo.StateKey])
                     if not isSyncingFromGame then
                         SetGameSetting(sInfo.GuiName, data[sInfo.StateKey], sInfo.SettingKey)
                     end
-                end
+                end)
             end
-            if data.AutoSolveFateSword ~= nil then
-                State.AutoSolveFateSword = (data.AutoSolveFateSword ~= false)
-                if MacLib.Options["Toggle_AutoSolveFateSword"] then
-                    MacLib.Options["Toggle_AutoSolveFateSword"]:UpdateState(State.AutoSolveFateSword)
-                end
-            end
-            if data.AutoDefendMoneyUnits ~= nil then
-                State.AutoDefendMoneyUnits = (data.AutoDefendMoneyUnits ~= false)
-                if MacLib.Options["Toggle_AutoDefendMoneyUnits"] then
-                    MacLib.Options["Toggle_AutoDefendMoneyUnits"]:UpdateState(State.AutoDefendMoneyUnits)
-                end
-            end
-            isLoadingConfig = false
         end
+        if data.AutoSolveFateSword ~= nil then
+            State.AutoSolveFateSword = (data.AutoSolveFateSword ~= false)
+            if MacLib.Options["Toggle_AutoSolveFateSword"] then
+                pcall(function() MacLib.Options["Toggle_AutoSolveFateSword"]:UpdateState(State.AutoSolveFateSword) end)
+            end
+        end
+        if data.AutoDefendMoneyUnits ~= nil then
+            State.AutoDefendMoneyUnits = (data.AutoDefendMoneyUnits ~= false)
+            if MacLib.Options["Toggle_AutoDefendMoneyUnits"] then
+                pcall(function() MacLib.Options["Toggle_AutoDefendMoneyUnits"]:UpdateState(State.AutoDefendMoneyUnits) end)
+            end
+        end
+    end)
+    if not okMain then
+        warn("[STRIX HUB] LoadConfig error: " .. tostring(mainErr))
     end
     isLoadingConfig = false
 end
@@ -3492,7 +3760,9 @@ pcall(function()
         Tabs.AutoCreate:Select()
     end
 end)
-UpdateChallengeInfoDisplay()
+if isLobby then
+    pcall(UpdateChallengeInfoDisplay)
+end
 
 getgenv().STRIX_HUB = {
     Window = Window,
