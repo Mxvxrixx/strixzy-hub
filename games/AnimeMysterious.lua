@@ -52,28 +52,31 @@ local function EnsureFolders()
 end
 EnsureFolders()
 
---// Singleton Controller: clean up previous script instance threads and UI safely
-local currentJobId = game.JobId
-if _G.STRIX_HUB_CLEANUP then
-    pcall(_G.STRIX_HUB_CLEANUP)
-    _G.STRIX_HUB_CLEANUP = nil
+--// Safe Instance Cleanup (Neutralizes Unload recursion & dead C++ instance crashes)
+if getgenv().STRIX_HUB_CLEANUP then
+    pcall(getgenv().STRIX_HUB_CLEANUP)
+    task.wait(0.2)
 end
-if getgenv().STRIX_MOBILE_GUI then
-    pcall(function()
-        if getgenv().STRIX_MOBILE_GUI.Parent then
-            getgenv().STRIX_MOBILE_GUI:Destroy()
+
+pcall(function()
+    local searchLocations = {
+        (gethui and gethui()) or game:GetService("CoreGui"),
+        game:GetService("CoreGui"):FindFirstChild("RobloxGui"),
+        game:GetService("Players").LocalPlayer and game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
+    }
+    for _, loc in ipairs(searchLocations) do
+        if loc then
+            for _, child in ipairs(loc:GetChildren()) do
+                if child:IsA("ScreenGui") and (child:FindFirstChild("Base") or child.Name == "STRIX_MOBILE_TOGGLE") then
+                    pcall(function() child:Destroy() end)
+                end
+            end
         end
-    end)
-    getgenv().STRIX_MOBILE_GUI = nil
-end
--- Never invoke Unload across different servers/teleports as C++ instances are already dead (0xC0000005 crash)
-if _G.STRIX_HUB_JOB_ID == currentJobId and _G.STRIX_HUB and _G.STRIX_HUB.Window and _G.STRIX_HUB.Window.Unload then
-    pcall(function() _G.STRIX_HUB.Window:Unload() end)
-end
-_G.STRIX_HUB = nil
+    end
+end)
 
 local isScriptRunning = true
-_G.STRIX_HUB_CLEANUP = function()
+getgenv().STRIX_HUB_CLEANUP = function()
     isScriptRunning = false
     if getgenv().STRIX_MOBILE_GUI then
         pcall(function()
@@ -83,10 +86,6 @@ _G.STRIX_HUB_CLEANUP = function()
         end)
         getgenv().STRIX_MOBILE_GUI = nil
     end
-    if _G.STRIX_HUB_JOB_ID == game.JobId and _G.STRIX_HUB and _G.STRIX_HUB.Window and _G.STRIX_HUB.Window.Unload then
-        pcall(function() _G.STRIX_HUB.Window:Unload() end)
-    end
-    _G.STRIX_HUB = nil
 end
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -655,20 +654,20 @@ end)
 --// Helper Functions
 local function SafeClick(button)
     if not button then return end
-    local triggered = false
-    if getconnections then
-        for _, conn in ipairs(getconnections(button.MouseButton1Click) or {}) do
-            pcall(function() conn:Fire() end)
-            triggered = true
-        end
-        for _, conn in ipairs(getconnections(button.Activated) or {}) do
-            pcall(function() conn:Fire() end)
-            triggered = true
-        end
-    end
-    if not triggered and firesignal then
+    if firesignal then
         pcall(firesignal, button.MouseButton1Click)
         pcall(firesignal, button.Activated)
+        return
+    end
+    if getconnections then
+        pcall(function()
+            for _, conn in ipairs(getconnections(button.MouseButton1Click) or {}) do
+                conn:Fire()
+            end
+            for _, conn in ipairs(getconnections(button.Activated) or {}) do
+                conn:Fire()
+            end
+        end)
     end
 end
 
@@ -757,79 +756,112 @@ end
 local ProcessAutoChallenges
 
 --// Challenge & Gameplay Helpers
-local function IsChallengeMatch()
-    if getgenv().STRIX_IS_CHALLENGE_MATCH == true then
-        return true
+local function GetCurrentGameMode()
+    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("PlayingGui")
+    local gm = pg and pg:FindFirstChild("Frame") and pg.Frame:FindFirstChild("MainContainer")
+        and pg.Frame.MainContainer:FindFirstChild("StageText")
+        and pg.Frame.MainContainer.StageText:FindFirstChild("GameMode")
+    if gm and gm.Text and gm.Text ~= "" then
+        return gm.Text
     end
-    local si = LocalPlayer.PlayerGui:FindFirstChild("StageInfo")
-    if si and si:FindFirstChild("Main") and si.Main:FindFirstChild("GameMode") then
-        local modeText = string.lower(si.Main.GameMode.Text)
-        if string.find(modeText, "challenge") then
+
+    local si = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("StageInfo")
+    local siGm = si and si:FindFirstChild("GameMode", true)
+    if siGm and siGm.Text and siGm.Text ~= "" then
+        return siGm.Text
+    end
+
+    local modeAttr = workspace:GetAttribute("GameMode") or workspace:GetAttribute("Mode")
+    if modeAttr and tostring(modeAttr) ~= "" then
+        return tostring(modeAttr)
+    end
+
+    return ""
+end
+
+local function IsChallengeMatch()
+    if isLobby or game.PlaceId == 117949143041402 or game.PlaceId == 110388679506690 then
+        return false
+    end
+
+    local modeText = string.lower(GetCurrentGameMode())
+    if modeText ~= "" then
+        -- Hard rejection for non-challenge game modes (Event, Story, Raid, Boss)
+        if string.find(modeText, "event") or string.find(modeText, "story") or string.find(modeText, "raid") or string.find(modeText, "boss") then
+            return false
+        end
+        -- Positive match for Challenge modes
+        if string.find(modeText, "challenge") or string.find(modeText, "weekly") or string.find(modeText, "daily") or string.find(modeText, "regular") then
             return true
         end
     end
-    if si then
-        for _, lbl in ipairs(si:GetDescendants()) do
-            if lbl:IsA("TextLabel") and string.find(string.lower(lbl.Text), "challenge") then
-                return true
-            end
+
+    -- Secondary check on StageMap label
+    local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("PlayingGui")
+    local sm = pg and pg:FindFirstChild("Frame") and pg.Frame:FindFirstChild("MainContainer")
+        and pg.Frame.MainContainer:FindFirstChild("StageText")
+        and pg.Frame.MainContainer.StageText:FindFirstChild("StageMap")
+    if sm and sm.Text then
+        local smText = string.lower(sm.Text)
+        if string.find(smText, "event") or string.find(smText, "story") or string.find(smText, "raid") or string.find(smText, "boss") then
+            return false
+        end
+        if string.find(smText, "challenge") then
+            return true
         end
     end
-    if game.PlaceId ~= 117949143041402 and State.AutoChallenges then
-        return true
-    end
+
     return false
 end
 
 local hasHandledLeave = false
 local isMatchFinished = false
-local lastChallengeResetCycle = nil
+local matchStartCycle = math.floor(os.time() / 1800)
+local pendingResetLeave = false
 
-local function CheckAndExecuteAutoLeave()
-    if game.PlaceId == 117949143041402 then
-        hasHandledLeave = false
-        isMatchFinished = false
-        getgenv().STRIX_IS_CHALLENGE_MATCH = false
-        return
+local function IsMatchFinished()
+    if isMatchFinished then
+        return true
     end
-    
-    if not State.AutoLeaveChallenge or hasHandledLeave then return end
-    if not IsChallengeMatch() then return end
-    
-    local eg = LocalPlayer.PlayerGui:FindFirstChild("EndGame")
+
+    local eg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("EndGame")
     local frame = eg and eg:FindFirstChild("EndGameFrame")
-    -- EndGameFrame must be visibly enabled on screen (NOT just its child button's property)
-    local isUIFinished = eg and eg.Enabled and frame and frame.Visible and (frame.AbsoluteSize.X > 50)
-    
-    local isMatchEnded = isMatchFinished or isUIFinished
-    if not isMatchEnded then return end
-    
+    -- In Gameplay, EndGameFrame.Visible is strictly false during the match. It only becomes true when the match is over!
+    if eg and eg.Enabled and frame and frame.Visible then
+        local resLabel = frame:FindFirstChild("Info") and frame.Info:FindFirstChild("ResultLabel")
+        local leaveBtn = frame:FindFirstChild("Buttons") and frame.Buttons:FindFirstChild("LeaveBtn")
+        if (resLabel and resLabel.Visible) or (leaveBtn and leaveBtn.Visible) then
+            return true
+        end
+    end
+
+    return false
+end
+
+local function ExecuteLeaveToLobby(reasonTitle, reasonDesc)
+    if hasHandledLeave then return end
     hasHandledLeave = true
-    pcall(function()
-        Window:Notify({
-            Title = "Auto Leave",
-            Description = "Challenge finished! Leaving to Lobby in 2s...",
-            Lifetime = 3
-        })
-    end)
-    
+
+    -- Notifications right before teleport are omitted to prevent render engine Tween crashes during DataModel teardown
+
     task.spawn(function()
         task.wait(2)
-        
-        -- Click Leave button on EndGameFrame if present
+
+        local eg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("EndGame")
+        local frame = eg and eg:FindFirstChild("EndGameFrame")
         local leaveBtn = frame and (frame:FindFirstChild("Buttons") and frame.Buttons:FindFirstChild("LeaveBtn") or frame:FindFirstChild("LeaveBtn", true))
         if leaveBtn then
             SafeClick(leaveBtn)
         end
-        
+
         local ge = ReplicatedStorage:FindFirstChild("GameEvents")
         local leaveReq = ge and ge:FindFirstChild("LeaveGameRequest")
         if leaveReq then
             pcall(function() leaveReq:FireServer() end)
         end
-        
+
         task.wait(4)
-        if game.PlaceId ~= 117949143041402 then
+        if game.PlaceId ~= 117949143041402 and not isLobby then
             pcall(function()
                 game:GetService("TeleportService"):Teleport(117949143041402)
             end)
@@ -837,52 +869,48 @@ local function CheckAndExecuteAutoLeave()
     end)
 end
 
--- Feature 5: Auto Leave on Challenge Reset (Check :00 and :30 minute marks)
-local function CheckChallengeResetLeave()
-    if not State.AutoLeaveOnChallengeReset then return end
-    if game.PlaceId == 117949143041402 then return end
-    if not IsChallengeMatch() then return end
+local function CheckAndExecuteAutoLeave()
+    if isLobby or game.PlaceId == 117949143041402 or game.PlaceId == 110388679506690 then
+        hasHandledLeave = false
+        isMatchFinished = false
+        pendingResetLeave = false
+        getgenv().STRIX_IS_CHALLENGE_MATCH = false
+        return
+    end
+
     if hasHandledLeave then return end
 
-    local now = os.time()
-    local d = os.date("*t", now)
-    local currentCycle = math.floor(now / 1800)
-
-    if (d.min == 0 or d.min == 30) and d.sec < 50 then
-        if lastChallengeResetCycle ~= currentCycle then
-            lastChallengeResetCycle = currentCycle
-            hasHandledLeave = true
-            pcall(function()
-                if Window and Window.Notify then
-                    Window:Notify({
-                        Title = "Challenge Reset",
-                        Description = "Challenge rotation reset! Leaving to Lobby in 2s...",
-                        Lifetime = 3
-                    })
-                end
-            end)
-            task.spawn(function()
-                task.wait(2)
-                local eg = LocalPlayer.PlayerGui:FindFirstChild("EndGame")
-                local frame = eg and eg:FindFirstChild("EndGameFrame")
-                local leaveBtn = frame and (frame:FindFirstChild("Buttons") and frame.Buttons:FindFirstChild("LeaveBtn") or frame:FindFirstChild("LeaveBtn", true))
-                if leaveBtn then
-                    SafeClick(leaveBtn)
-                end
-                local ge = ReplicatedStorage:FindFirstChild("GameEvents")
-                local leaveReq = ge and ge:FindFirstChild("LeaveGameRequest")
-                if leaveReq then
-                    pcall(function() leaveReq:FireServer() end)
-                end
-                task.wait(4)
-                if game.PlaceId ~= 117949143041402 then
-                    pcall(function()
-                        game:GetService("TeleportService"):Teleport(117949143041402)
-                    end)
-                end
-            end)
+    -- Check if Challenge rotation reset happened during this match (:00 or :30)
+    if State.AutoLeaveOnChallengeReset then
+        local now = os.time()
+        local currentCycle = math.floor(now / 1800)
+        local d = os.date("*t", now)
+        if currentCycle ~= matchStartCycle or (d.min == 0 or d.min == 30) then
+            pendingResetLeave = true
         end
     end
+
+    -- Rule 1: Auto Leave On Reset -> Regardless of what mode is playing (Story, Event, Raid, Boss, Challenge),
+    -- wait for match to finish, then leave to lobby to do the newly reset Challenges!
+    if State.AutoLeaveOnChallengeReset and pendingResetLeave then
+        if IsMatchFinished() then
+            ExecuteLeaveToLobby("Challenge Reset", "Challenge rotation reset! Match finished, leaving to Lobby for Challenges...")
+            return
+        end
+    end
+
+    -- Rule 2: Normal Auto Leave -> Strictly for Challenge match completion
+    if State.AutoLeaveChallenge and IsChallengeMatch() then
+        if IsMatchFinished() then
+            ExecuteLeaveToLobby("Auto Leave", "Challenge finished! Leaving to Lobby in 2s...")
+            return
+        end
+    end
+end
+
+-- Feature 5: Auto Leave on Challenge Reset (Check periodically in background loop)
+local function CheckChallengeResetLeave()
+    CheckAndExecuteAutoLeave()
 end
 
 -- Listen for EndGameEvent from server
@@ -892,7 +920,7 @@ pcall(function()
     if egEvent then
         egEvent.OnClientEvent:Connect(function()
             isMatchFinished = true
-            if State.AutoLeaveChallenge and not hasHandledLeave then
+            if (State.AutoLeaveChallenge or State.AutoLeaveOnChallengeReset) and not hasHandledLeave then
                 task.delay(1.5, function()
                     CheckAndExecuteAutoLeave()
                 end)
@@ -1078,9 +1106,10 @@ local function SolveFateSwordEvent()
                 pcall(function()
                     if fireproximityprompt then
                         fireproximityprompt(prompt, 0)
-                    end
-                    for _, c in ipairs(getconnections(prompt.Triggered) or {}) do
-                        pcall(function() c:Fire() end)
+                    elseif getconnections then
+                        for _, c in ipairs(getconnections(prompt.Triggered) or {}) do
+                            pcall(function() c:Fire() end)
+                        end
                     end
                 end)
 
@@ -1494,7 +1523,6 @@ pcall(function()
 end)
 
 --// Create MacLib Window
-local connsBefore = (getconnections and getconnections(UserInputService.InputEnded)) or {}
 local Window = MacLib:Window({
     Title = "STRIX HUB",
     Subtitle = "Anime Mysterious",
@@ -1504,25 +1532,18 @@ local Window = MacLib:Window({
     ShowUserInfo = (State.ShowUserInfo ~= false),
     Keybind = (State.Keybind and State.Keybind ~= Enum.KeyCode.Unknown) and State.Keybind or Enum.KeyCode.RightControl
 })
-local connsAfter = (getconnections and getconnections(UserInputService.InputEnded)) or {}
-for _, conn in ipairs(connsAfter) do
-    local isNew = true
-    for _, old in ipairs(connsBefore) do
-        if old == conn then isNew = false break end
-    end
-    if isNew and conn.Disconnect then
-        pcall(function() conn:Disconnect() end)
-    end
-end
 
--- Hook Window Unload
+-- Completely disable MacLib notifications to prevent CanvasGroup DirectX device lost crashes
+Window:SetNotificationsState(false)
+
+-- Safe Window Unload hook (no circular recursion)
 if Window.onUnloaded then
     Window.onUnloaded(function()
-        if _G.STRIX_HUB_CLEANUP then pcall(_G.STRIX_HUB_CLEANUP) end
+        if getgenv().STRIX_HUB_CLEANUP then pcall(getgenv().STRIX_HUB_CLEANUP) end
     end)
 end
 
--- Override Maclib's Dialog to neutralize the broken CanvasGroup reparenting bug & execute exit directly
+-- Neutralize Maclib's Dialog to prevent CanvasGroup creation
 Window.Dialog = function(self, dialogSettings)
     if dialogSettings and dialogSettings.Buttons then
         for _, btn in ipairs(dialogSettings.Buttons) do
@@ -1565,6 +1586,34 @@ local function SetupWindowResize()
     EnforceFrameLayout()
     if base:FindFirstChild("BaseUIScale") then
         base.BaseUIScale:Destroy()
+    end
+
+    -- Replace Maclib's exit button with a clean clone to detach the broken CanvasGroup Dialog listener
+    local exitBtn = base:FindFirstChild("Exit", true)
+    if exitBtn and exitBtn:IsA("TextButton") then
+        local p = exitBtn.Parent
+        local cleanExit = exitBtn:Clone()
+        cleanExit.Name = "ExitClean"
+        cleanExit.LayoutOrder = exitBtn.LayoutOrder
+        cleanExit.Parent = p
+        pcall(function() exitBtn:Destroy() end)
+
+        local exited = false
+        local function doExit()
+            if exited then return end
+            exited = true
+            if getgenv().STRIX_HUB_CLEANUP then pcall(getgenv().STRIX_HUB_CLEANUP) end
+            pcall(function()
+                if Window and Window.Unload then Window:Unload() end
+            end)
+            pcall(function()
+                if targetScreenGui and targetScreenGui.Parent then
+                    targetScreenGui:Destroy()
+                end
+            end)
+        end
+        cleanExit.MouseButton1Click:Connect(doExit)
+        cleanExit.Activated:Connect(doExit)
     end
 
     local MIN_W, MAX_W = 760, 1150
@@ -2719,8 +2768,23 @@ ProcessAutoChallenges = function()
     local PlayGUI = LocalPlayer.PlayerGui:FindFirstChild("PlayGUI")
     local pf = PlayGUI and PlayGUI:FindFirstChild("PlayFrame")
     
-    -- Case 1: PlayFrame is already open -> Press "Play" & ensure failsafe teleport
+    -- Case 1: PlayFrame is already open -> Press "Play" only if it is confirmed to be a Challenge room
     if pf and pf.Visible then
+        local isPfChallenge = false
+        if PlayModule and (PlayModule.SessionMode == "Challange" or PlayModule.SessionMode == "Challenge") then
+            isPfChallenge = true
+        end
+        for _, lbl in ipairs(pf:GetDescendants()) do
+            if lbl:IsA("TextLabel") and string.find(string.lower(lbl.Text), "challenge") then
+                isPfChallenge = true
+                break
+            end
+        end
+
+        if not isPfChallenge then
+            return false
+        end
+
         if not PlayGUI.Enabled then
             PlayGUI.Enabled = true
         end
@@ -3363,13 +3427,7 @@ else
 end
 UpdateChallengeInfoDisplay()
 
-Window:Notify({
-    Title = "STRIX HUB",
-    Description = "Loaded Anime Mysterious Hub!",
-    Lifetime = 5
-})
-
-_G.STRIX_HUB = {
+getgenv().STRIX_HUB = {
     Window = Window,
     Tabs = Tabs,
     State = State,
@@ -3377,4 +3435,4 @@ _G.STRIX_HUB = {
     SaveConfig = SaveConfig,
     LoadConfig = LoadConfig
 }
-_G.STRIX_HUB_JOB_ID = game.JobId
+getgenv().STRIX_HUB_JOB_ID = game.JobId
