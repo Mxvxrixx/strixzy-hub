@@ -94,6 +94,10 @@ getgenv().STRIX_HUB_CLEANUP = function()
         end)
         getgenv().STRIX_MOBILE_GUI = nil
     end
+    if getgenv().STRIX_UI_RESIZE_CLEANUP then
+        pcall(getgenv().STRIX_UI_RESIZE_CLEANUP)
+        getgenv().STRIX_UI_RESIZE_CLEANUP = nil
+    end
 end
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -512,7 +516,7 @@ local function ResolveBind(bindName)
     return nil
 end
 
--- Pre-load early settings into State (Keybind, UISize, UIScale, Blur, UserInfo, MobileToggle, Maps, etc.) before Window creation
+-- Pre-load early settings into State (Keybind, UISize, Blur, UserInfo, MobileToggle, Maps, etc.) before Window creation
 EnsureFolders()
 local earlyTarget = ConfigFile
 if not isfile(earlyTarget) then
@@ -1816,18 +1820,37 @@ Window.Dialog = function(self, dialogSettings)
     }
 end
 
---// Resizable Window Setup (Drag to Resize + Proportion Fix)
+--// Resizable Window Setup (Responsive Screen Auto-Scale + Drag to Resize + Proportion Fix)
+local UpdateResponsiveScaleRef = nil
+
 local function SetupWindowResize()
     local targetScreenGui
     local parent = (gethui and gethui()) or game:GetService("CoreGui")
-    for _, v in ipairs(parent:GetChildren()) do
-        if v:IsA("ScreenGui") and v:FindFirstChild("Base") then
-            targetScreenGui = v
-            break
+
+    -- Retry briefly to ensure ScreenGui is ready
+    local deadline = os.clock() + 3
+    repeat
+        for _, v in ipairs(parent:GetChildren()) do
+            if v:IsA("ScreenGui") and v:FindFirstChild("Base") then
+                targetScreenGui = v
+                break
+            end
         end
-    end
+        if not targetScreenGui and os.clock() < deadline then
+            task.wait(0.05)
+        end
+    until targetScreenGui or os.clock() >= deadline
+
     if not targetScreenGui or not targetScreenGui:FindFirstChild("Base") then return end
     local base = targetScreenGui.Base
+
+    -- Ensure BaseUIScale is active (never destroy it, used for proportional screen scaling)
+    local baseUIScale = base:FindFirstChild("BaseUIScale")
+    if not baseUIScale or not baseUIScale:IsA("UIScale") then
+        baseUIScale = Instance.new("UIScale")
+        baseUIScale.Name = "BaseUIScale"
+        baseUIScale.Parent = base
+    end
 
     local function EnforceFrameLayout()
         local sidebar = base:FindFirstChild("Sidebar")
@@ -1840,9 +1863,6 @@ local function SetupWindowResize()
         end
     end
     EnforceFrameLayout()
-    if base:FindFirstChild("BaseUIScale") then
-        base.BaseUIScale:Destroy()
-    end
 
     -- Replace Maclib's exit button with a clean clone to detach the broken CanvasGroup Dialog listener
     local exitBtn = base:FindFirstChild("Exit", true)
@@ -1872,8 +1892,145 @@ local function SetupWindowResize()
         cleanExit.Activated:Connect(doExit)
     end
 
-    local MIN_W, MAX_W = 760, 1150
-    local MIN_H, MAX_H = 480, 850
+    local DESIGN_BASE_W = 868
+    local DESIGN_BASE_H = 650
+    local MIN_W, MAX_W = 720, 1150
+    local MIN_H, MAX_H = 460, 850
+
+    local function GetScreenDimensions()
+        local w = (targetScreenGui and targetScreenGui.AbsoluteSize.X > 0 and targetScreenGui.AbsoluteSize.X)
+        local h = (targetScreenGui and targetScreenGui.AbsoluteSize.Y > 0 and targetScreenGui.AbsoluteSize.Y)
+        if not w or not h or w < 100 or h < 100 then
+            local cam = workspace.CurrentCamera
+            if cam and cam.ViewportSize.X > 100 and cam.ViewportSize.Y > 100 then
+                w = cam.ViewportSize.X
+                h = cam.ViewportSize.Y
+            else
+                w = 1280
+                h = 720
+            end
+        end
+        return w, h
+    end
+
+    local function CalculateFitScale()
+        local screenW, screenH = GetScreenDimensions()
+        local curBaseW = (base.Size.X.Offset > 0 and base.Size.X.Offset) or DESIGN_BASE_W
+        local curBaseH = (base.Size.Y.Offset > 0 and base.Size.Y.Offset) or DESIGN_BASE_H
+
+        -- Dynamic margin based on screen width/height to maximize usable space on tight screens
+        local marginX = (screenW < 750) and 10 or ((screenW < 1000) and 16 or 24)
+        local marginY = (screenH < 550) and 10 or ((screenH < 750) and 16 or 24)
+        local availW = math.max(screenW - marginX * 2, 200)
+        local availH = math.max(screenH - marginY * 2, 180)
+
+        local scaleX = availW / curBaseW
+        local scaleY = availH / curBaseH
+        local autoFit = math.min(scaleX, scaleY)
+
+        -- Intelligent scale ceiling based on display resolution (crisp on 4K, native on 1080p, auto-fit on small)
+        local maxScale = 1.0
+        if screenW >= 3400 and screenH >= 1900 then
+            maxScale = 1.30
+        elseif screenW >= 2400 and screenH >= 1300 then
+            maxScale = 1.15
+        end
+
+        local minScale = 0.35
+        return math.clamp(autoFit, minScale, maxScale)
+    end
+
+    local function ClampWindowBounds(targetScale)
+        if not base or not base.Parent then return end
+        local s = targetScale or (baseUIScale and baseUIScale.Scale) or 1
+        if s <= 0 then s = 1 end
+        local screenW, screenH = GetScreenDimensions()
+
+        local curBaseW = (base.Size.X.Offset > 0 and base.Size.X.Offset) or DESIGN_BASE_W
+        local curBaseH = (base.Size.Y.Offset > 0 and base.Size.Y.Offset) or DESIGN_BASE_H
+
+        local visualW = curBaseW * s
+        local visualH = curBaseH * s
+
+        local halfW = visualW * 0.5
+        local halfH = visualH * 0.5
+
+        -- Center point in screen pixels
+        local currentCenterX = base.Position.X.Scale * screenW + base.Position.X.Offset
+        local currentCenterY = base.Position.Y.Scale * screenH + base.Position.Y.Offset
+
+        local margin = 8
+        local minX = halfW + margin
+        local maxX = screenW - halfW - margin
+        local minY = halfH + margin
+        local maxY = screenH - halfH - margin
+
+        local targetCenterX, targetCenterY
+        if maxX <= minX then
+            targetCenterX = screenW * 0.5
+        else
+            targetCenterX = math.clamp(currentCenterX, minX, maxX)
+        end
+
+        if maxY <= minY then
+            targetCenterY = screenH * 0.5
+        else
+            targetCenterY = math.clamp(currentCenterY, minY, maxY)
+        end
+
+        base.AnchorPoint = Vector2.new(0.5, 0.5)
+        base.Position = UDim2.new(0.5, math.round(targetCenterX - screenW * 0.5), 0.5, math.round(targetCenterY - screenH * 0.5))
+    end
+
+    local function UpdateResponsiveScale(forceCenter)
+        if not base or not base.Parent then return end
+        EnforceFrameLayout()
+        local scale = CalculateFitScale()
+        baseUIScale.Scale = scale
+        if forceCenter then
+            base.AnchorPoint = Vector2.new(0.5, 0.5)
+            base.Position = UDim2.fromScale(0.5, 0.5)
+        else
+            ClampWindowBounds(scale)
+        end
+    end
+
+    UpdateResponsiveScaleRef = UpdateResponsiveScale
+
+    -- Viewport & Resolution Change Listeners
+    local resizeConnections = {}
+    local function CleanResizeConnections()
+        for _, c in ipairs(resizeConnections) do
+            pcall(function() c:Disconnect() end)
+        end
+        table.clear(resizeConnections)
+    end
+    getgenv().STRIX_UI_RESIZE_CLEANUP = CleanResizeConnections
+
+    local resizeDebounce = false
+    local function SafeTriggerResize()
+        if resizeDebounce then return end
+        resizeDebounce = true
+        task.delay(0.05, function()
+            resizeDebounce = false
+            pcall(function()
+                UpdateResponsiveScale(false)
+            end)
+        end)
+    end
+
+    table.insert(resizeConnections, targetScreenGui:GetPropertyChangedSignal("AbsoluteSize"):Connect(SafeTriggerResize))
+    local camera = workspace.CurrentCamera or workspace:WaitForChild("Camera", 5)
+    if camera then
+        table.insert(resizeConnections, camera:GetPropertyChangedSignal("ViewportSize"):Connect(SafeTriggerResize))
+    end
+    table.insert(resizeConnections, workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+        local newCam = workspace.CurrentCamera
+        if newCam then
+            table.insert(resizeConnections, newCam:GetPropertyChangedSignal("ViewportSize"):Connect(SafeTriggerResize))
+        end
+        SafeTriggerResize()
+    end))
 
     local resizingType = nil
     local startMousePos
@@ -1960,9 +2117,12 @@ local function SetupWindowResize()
     cornerBtn.MouseEnter:Connect(function() grip.ImageTransparency = 0.25 end)
     cornerBtn.MouseLeave:Connect(function() if not resizingType then grip.ImageTransparency = 0.5 end end)
 
-    UserInputService.InputChanged:Connect(function(input)
+    table.insert(resizeConnections, UserInputService.InputChanged:Connect(function(input)
         if resizingType and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
-            local delta = input.Position - startMousePos
+            local currentScale = (baseUIScale and baseUIScale.Scale) or 1
+            if currentScale <= 0 then currentScale = 1 end
+
+            local delta = (input.Position - startMousePos) / currentScale
             local newW = startOffsetSize.X
             local newH = startOffsetSize.Y
 
@@ -1975,8 +2135,8 @@ local function SetupWindowResize()
                 newH = math.clamp(startOffsetSize.Y + delta.Y, MIN_H, MAX_H)
             end
 
-            local diffX = newW - startOffsetSize.X
-            local diffY = newH - startOffsetSize.Y
+            local diffX = (newW - startOffsetSize.X) * currentScale
+            local diffY = (newH - startOffsetSize.Y) * currentScale
 
             base.Size = UDim2.fromOffset(newW, newH)
             base.Position = UDim2.new(
@@ -1985,19 +2145,31 @@ local function SetupWindowResize()
             )
             EnforceFrameLayout()
             State.UISize = { Width = newW, Height = newH }
+            ClampWindowBounds(currentScale)
         end
-    end)
+    end))
 
-    UserInputService.InputEnded:Connect(function(input)
+    table.insert(resizeConnections, UserInputService.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
             if resizingType then
                 resizingType = nil
                 grip.ImageTransparency = 0.5
                 EnforceFrameLayout()
+                UpdateResponsiveScale(false)
                 SaveConfigDebounced()
+            else
+                -- If dragging ended, clamp cleanly so window never gets pushed outside screen
+                task.defer(function()
+                    pcall(function()
+                        ClampWindowBounds()
+                    end)
+                end)
             end
         end
-    end)
+    end))
+
+    -- Initial startup auto-adaptation: calculate fit scale & center immediately
+    UpdateResponsiveScale(true)
 end
 
 task.spawn(SetupWindowResize)
@@ -3697,6 +3869,9 @@ LoadConfig = function()
                     end
                 end
             end)
+        end
+        if UpdateResponsiveScaleRef then
+            pcall(function() UpdateResponsiveScaleRef(false) end)
         end
         if data.AcrylicBlur ~= nil and MacLib.Options["Toggle_AcrylicBlur"] then
             pcall(function()
