@@ -2646,12 +2646,19 @@ SettingsSections.Controls:Keybind({
     Blacklist = false,
     Default = (State.Keybind and State.Keybind ~= Enum.KeyCode.Unknown) and State.Keybind or Enum.KeyCode.RightControl,
     Callback = function(binded)
-        Window:SetState(not Window:GetState())
+        State.Keybind = binded
+        if Window and Window.SetKeybind then
+            Window:SetKeybind(binded)
+        end
+        SaveConfigDebounced()
     end,
     onBinded = function(bind)
         if bind and bind ~= Enum.KeyCode.Unknown then
             State.Keybind = bind
-            SaveConfig()
+            if Window and Window.SetKeybind then
+                Window:SetKeybind(bind)
+            end
+            SaveConfigDebounced()
         end
     end
 }, "Keybind_ToggleUI")
@@ -3351,6 +3358,9 @@ LoadConfig = function()
                 local k = ResolveBind(data.Keybind)
                 if k and k ~= Enum.KeyCode.Unknown then
                     State.Keybind = k
+                    if Window and Window.SetKeybind then
+                        Window:SetKeybind(k)
+                    end
                     if MacLib.Options["Keybind_ToggleUI"] then
                         MacLib.Options["Keybind_ToggleUI"]:Bind(k)
                     end
