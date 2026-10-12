@@ -161,10 +161,12 @@ while (not MapConfig or next(MapConfig) == nil) and (os.clock() < mapWaitDeadlin
 end
 
 local SummonConfig = Modules and Modules:FindFirstChild("SummonConfig") and select(2, pcall(require, Modules.SummonConfig)) or {}
-local ShopModule = Modules and (isLobby and (Modules:WaitForChild("ShopModule", 5) or Modules:FindFirstChild("ShopModule")) or Modules:FindFirstChild("ShopModule"))
-local ShopConfig = (ShopModule and (ShopModule:FindFirstChild("ShopConfig") or ShopModule:WaitForChild("ShopConfig", 2)) and select(2, pcall(require, ShopModule.ShopConfig))) or {}
+local rawShopModule = Modules and (isLobby and (Modules:WaitForChild("ShopModule", 5) or Modules:FindFirstChild("ShopModule")) or Modules:FindFirstChild("ShopModule"))
+local ShopModule = rawShopModule and select(2, pcall(require, rawShopModule)) or nil
+local ShopConfig = (rawShopModule and (rawShopModule:FindFirstChild("ShopConfig") or rawShopModule:WaitForChild("ShopConfig", 2)) and select(2, pcall(require, rawShopModule.ShopConfig))) or {}
 local ItemDatabase = Modules and (Modules:FindFirstChild("ItemDatabase") or Modules:WaitForChild("ItemDatabase", 5)) and select(2, pcall(require, Modules.ItemDatabase)) or nil
-local GemsShopModule = Modules and (isLobby and (Modules:WaitForChild("GemsShopModule", 5) or Modules:FindFirstChild("GemsShopModule")) or Modules:FindFirstChild("GemsShopModule")) and select(2, pcall(require, Modules.GemsShopModule)) or nil
+local rawGemsShopModule = Modules and (isLobby and (Modules:WaitForChild("GemsShopModule", 5) or Modules:FindFirstChild("GemsShopModule")) or Modules:FindFirstChild("GemsShopModule"))
+local GemsShopModule = rawGemsShopModule and select(2, pcall(require, rawGemsShopModule)) or nil
 local SettingModule = Modules and (Modules:FindFirstChild("SettingModule") or Modules:WaitForChild("SettingModule", 5)) and select(2, pcall(require, Modules.SettingModule)) or nil
 
 
@@ -238,6 +240,35 @@ local patDivLine = "line%.BackgroundColor3 = Color3%.fromRGB%(255, 255, 255%)\r?
 local replDivLine = "line.BackgroundColor3 = Color3.fromRGB(255, 255, 255)\n\t\t\t\t\tline.BackgroundTransparency = 0.68\n\t\t\t\t\tline.BorderSizePixel = 0\n\t\t\t\t\tline.Size = UDim2.new(1, 0, 0, 1)"
 rawMaclibSource = rawMaclibSource:gsub(patDivLine, replDivLine)
 rawMaclibSource = rawMaclibSource:gsub("uIPadding%.PaddingBottom = UDim%.new%(0, 8%)\r?\n\t*uIPadding%.PaddingTop = UDim%.new%(0, 8%)", "uIPadding.PaddingBottom = UDim.new(0, 10)\n\t\t\t\t\tuIPadding.PaddingTop = UDim.new(0, 10)")
+
+-- Patch 5: Safe Tween engine wrapper (Bypasses Roblox thread capability Plugin crashes on protected GUI hierarchies)
+local patTween = "local function Tween%(instance, tweeninfo, propertytable%)\r?\n\t*return TweenService:Create%(instance, tweeninfo, propertytable%)\r?\nend"
+local replTween = [[local function Tween(instance, tweeninfo, propertytable)
+	local ok, tw = pcall(function()
+		return TweenService:Create(instance, tweeninfo, propertytable)
+	end)
+	if ok and tw then
+		return tw
+	end
+	pcall(function()
+		if instance and propertytable then
+			for prop, val in pairs(propertytable) do
+				instance[prop] = val
+			end
+		end
+	end)
+	return {
+		Play = function() end,
+		Stop = function() end,
+		Cancel = function() end,
+		Pause = function() end,
+		Completed = {
+			Connect = function() return { Disconnect = function() end } end,
+			Wait = function() end
+		}
+	}
+end]]
+rawMaclibSource = rawMaclibSource:gsub(patTween, replTween)
 
 MacLib = loadstring(rawMaclibSource)()
 _G.MacLib = MacLib
@@ -2713,15 +2744,36 @@ SettingsSections.Config:Button({
 -- ====================================================================
 
 local function ProcessAutoBuy()
+    -- Auto-Buy is strictly a Lobby action (Shop modules do not exist in Battle Place)
+    if not isLobby or not BuyItem then return false end
     local didBuy = false
     
+    -- Dynamically resolve Shop modules if not yet loaded
+    if not GemsShopModule and Modules then
+        local gsm = Modules:FindFirstChild("GemsShopModule")
+        if gsm then
+            local ok, m = pcall(require, gsm)
+            if ok and type(m) == "table" then GemsShopModule = m end
+        end
+    end
+    if not ShopModule and Modules then
+        local sm = Modules:FindFirstChild("ShopModule")
+        if sm then
+            local ok, m = pcall(require, sm)
+            if ok and type(m) == "table" then ShopModule = m end
+        end
+    end
+    
     -- Gems Shop
-    if State.AutoBuyGems and #State.SelectedGemsItems > 0 then
+    if State.AutoBuyGems and #State.SelectedGemsItems > 0 and GemsShopModule and type(GemsShopModule.GetStockLeft) == "function" then
         local currentGems = LocalPlayer:GetAttribute("Gems") or 0
         for _, itemId in ipairs(State.SelectedGemsItems) do
             for _, itemConfig in pairs(GameData.GemsItemMap) do
                 if itemConfig.ID == itemId and currentGems >= itemConfig.Price then
-                    local stock = GemsShopModule:GetStockLeft(itemId, itemConfig.MaxStock)
+                    local okStock, stock = pcall(function()
+                        return GemsShopModule:GetStockLeft(itemId, itemConfig.MaxStock)
+                    end)
+                    stock = (okStock and tonumber(stock)) or 0
                     local affordable = math.floor(currentGems / itemConfig.Price)
                     local buyCount = math.min(stock, affordable)
                     if buyCount > 0 then
@@ -2740,12 +2792,15 @@ local function ProcessAutoBuy()
     end
     
     -- Gold Shop
-    if State.AutoBuyGold and #State.SelectedGoldItems > 0 then
+    if State.AutoBuyGold and #State.SelectedGoldItems > 0 and ShopModule and type(ShopModule.GetStockLeft) == "function" then
         local currentCoins = LocalPlayer:GetAttribute("Coins") or 0
         for _, itemId in ipairs(State.SelectedGoldItems) do
             for _, itemConfig in pairs(GameData.GoldItemMap) do
                 if itemConfig.ID == itemId and currentCoins >= itemConfig.Price then
-                    local stock = ShopModule:GetStockLeft(itemId, itemConfig.MaxStock)
+                    local okStock, stock = pcall(function()
+                        return ShopModule:GetStockLeft(itemId, itemConfig.MaxStock)
+                    end)
+                    stock = (okStock and tonumber(stock)) or 0
                     local affordable = math.floor(currentCoins / itemConfig.Price)
                     local buyCount = math.min(stock, affordable)
                     if buyCount > 0 then
@@ -3430,11 +3485,13 @@ end
 
 -- Auto Run on script execution
 LoadConfig()
-if isBattlePlace and Tabs.Gameplay then
-    Tabs.Gameplay:Select()
-else
-    Tabs.AutoCreate:Select()
-end
+pcall(function()
+    if isBattlePlace and Tabs.Gameplay then
+        Tabs.Gameplay:Select()
+    elseif Tabs.AutoCreate then
+        Tabs.AutoCreate:Select()
+    end
+end)
 UpdateChallengeInfoDisplay()
 
 getgenv().STRIX_HUB = {
