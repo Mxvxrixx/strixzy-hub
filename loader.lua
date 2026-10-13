@@ -1,3 +1,5 @@
+repeat task.wait() until game:IsLoaded() 
+
 local GITHUB_USER = "Mxvxrixx"
 local REPO_NAME   = "strixzy-hub"
 local BRANCH      = "main"
