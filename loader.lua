@@ -1,4 +1,6 @@
-repeat task.wait() until game:IsLoaded() 
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
 
 local GITHUB_USER = "Mxvxrixx"
 local REPO_NAME   = "strixzy-hub"
