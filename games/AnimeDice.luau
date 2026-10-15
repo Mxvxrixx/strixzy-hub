@@ -119,7 +119,6 @@ end
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
 local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
 
 -- Framework Modules (Safe Resolution)
 local DataController = nil
@@ -175,10 +174,6 @@ local QuestConfig = nil
 pcall(function()
     QuestConfig = require(ReplicatedStorage.Framework.Features.Quests.QuestConfig)
 end)
-local QuirksConfig = nil
-pcall(function()
-    QuirksConfig = require(ReplicatedStorage.Framework.Features.Quirks.Quirks)
-end)
 local QuirkUtil = nil
 pcall(function()
     QuirkUtil = require(ReplicatedStorage.Framework.Features.Quirks.QuirkUtil)
@@ -199,7 +194,6 @@ local RollDiceRF      = GetRemote("RollService", "RF", "RollDice")
 local BuyDiceRE       = GetRemote("DiceShopService", "RE", "BuyDice")
 local EquipDiceRE     = GetRemote("DiceShopService", "RE", "EquipDice")
 local UpdateAutoSellRE = GetRemote("SellService", "RE", "UpdateAutoSell")
-local SellInventoryRF = GetRemote("SellService", "RF", "SellInventory")
 local EquipBestRE     = GetRemote("PlotService", "RE", "EquipBest")
 local InteractSlotRE  = GetRemote("PlotService", "RE", "InteractSlot")
 local UnequipRF       = GetRemote("UnitService", "RF", "Unequip")
@@ -212,6 +206,8 @@ local BuyUpgradeRE    = Network and Network:FindFirstChild("RE") and Network.RE:
 local ClaimDailyRewardRE = GetRemote("DailyRewardService", "RE", "Claim")
 local ClaimQuestRE    = GetRemote("QuestService", "RE", "Claim")
 local RollQuirkRE     = GetRemote("QuirkService", "RE", "Roll")
+local RollGradeRE     = GetRemote("GradeService", "RE", "Roll")
+local RollTraitRE     = GetRemote("TraitService", "RE", "Roll")
 
 -- ==============================================================================
 -- 2. STATE & CONFIGURATION MANAGEMENT
@@ -234,7 +230,17 @@ local State = {
     -- Hub & Quirks
     AutoQuirks = false,
     SelectedQuirkUnits = {},
-    SelectedQuirks = { "Fortune III", "Tycoon", "Prodigy", "Midas Touch", "Fortune's Favor" },
+    SelectedQuirks = { "Fortune's Favor", "Midas Touch", "Prodigy", "Tycoon", "Fortune III" },
+
+    -- Hub & Grades
+    AutoGrades = false,
+    SelectedGradeUnits = {},
+    SelectedGrades = { "Ω", "∞", "神", "Z+", "Z" },
+
+    -- Hub & Traits
+    AutoTraits = false,
+    SelectedTraitUnits = {},
+    SelectedTraits = { "Genesis", "Paradox", "Eternal", "Transcendent", "Monarch" },
 
     -- Potions & Boosts Automation
     AutoUsePotions = false,
@@ -275,6 +281,21 @@ local function ResolveBind(bindName)
     return nil
 end
 
+local function NormalizeSelectionList(selection, default)
+    if type(selection) == "table" then
+        local res = {}
+        for k, v in pairs(selection) do
+            if type(k) == "number" then
+                table.insert(res, v)
+            elseif v == true then
+                table.insert(res, k)
+            end
+        end
+        if #res > 0 or not default then return res end
+    end
+    return default or {}
+end
+
 local function SaveConfig()
     if not isScriptRunning or isLoadingConfig then return end
     EnsureFolders()
@@ -295,47 +316,20 @@ local function SaveConfig()
         AutoClaimQuests = (State.AutoClaimQuests == true),
         AutoClaimDailyReward = (State.AutoClaimDailyReward == true),
         AutoQuirks = (State.AutoQuirks == true),
-        SelectedQuirkUnits = (function()
-            if type(State.SelectedQuirkUnits) == "table" then
-                local res = {}
-                for k, v in pairs(State.SelectedQuirkUnits) do
-                    if type(k) == "number" then table.insert(res, v)
-                    elseif v == true then table.insert(res, k) end
-                end
-                return res
-            end
-            return {}
-        end)(),
-        SelectedQuirks = (function()
-            if type(State.SelectedQuirks) == "table" then
-                local res = {}
-                for k, v in pairs(State.SelectedQuirks) do
-                    if type(k) == "number" then table.insert(res, v)
-                    elseif v == true then table.insert(res, k) end
-                end
-                if #res > 0 then return res end
-            end
-            return { "Fortune III", "Tycoon", "Prodigy", "Midas Touch", "Fortune's Favor" }
-        end)(),
+        SelectedQuirkUnits = NormalizeSelectionList(State.SelectedQuirkUnits),
+        SelectedQuirks = NormalizeSelectionList(State.SelectedQuirks, { "Fortune's Favor", "Midas Touch", "Prodigy", "Tycoon", "Fortune III" }),
+        AutoGrades = (State.AutoGrades == true),
+        SelectedGradeUnits = NormalizeSelectionList(State.SelectedGradeUnits),
+        SelectedGrades = NormalizeSelectionList(State.SelectedGrades, { "Ω", "∞", "神", "Z+", "Z" }),
+        AutoTraits = (State.AutoTraits == true),
+        SelectedTraitUnits = NormalizeSelectionList(State.SelectedTraitUnits),
+        SelectedTraits = NormalizeSelectionList(State.SelectedTraits, { "Genesis", "Paradox", "Eternal", "Transcendent", "Monarch" }),
         AutoSellEnabled = (State.AutoSellEnabled == true),
         AutoSellNumber = tostring(State.AutoSellNumber or "10"),
         AutoSellUnit = tostring(State.AutoSellUnit or "k"),
         AutoSellValue = tonumber(State.AutoSellValue) or 0,
         AutoUsePotions = (State.AutoUsePotions == true),
-        AutoUsePotionTypes = (function()
-            if type(State.AutoUsePotionTypes) == "table" then
-                local res = {}
-                for k, v in pairs(State.AutoUsePotionTypes) do
-                    if type(k) == "number" then
-                        table.insert(res, v)
-                    elseif v == true then
-                        table.insert(res, k)
-                    end
-                end
-                if #res > 0 then return res end
-            end
-            return { "Luck", "Damage", "Income", "Speed" }
-        end)(),
+        AutoUsePotionTypes = NormalizeSelectionList(State.AutoUsePotionTypes, { "Luck", "Damage", "Income", "Speed" }),
         AutoUsePotionMode = tostring(State.AutoUsePotionMode or "Keep Active"),
         AutoCollectPlot = (State.AutoCollectPlot == true),
         CollectInterval = tonumber(State.CollectInterval) or 5,
@@ -382,6 +376,27 @@ if isfile and isfile(ConfigFile) then
             if data.AutoEquipBestDice ~= nil then State.AutoEquipBestDice = (data.AutoEquipBestDice == true) end
             if data.AutoRebirth ~= nil then State.AutoRebirth = (data.AutoRebirth == true) end
             if data.AutoUpgrades ~= nil then State.AutoUpgrades = (data.AutoUpgrades == true) end
+            if data.AutoQuirks ~= nil then State.AutoQuirks = (data.AutoQuirks == true) end
+            if data.SelectedQuirkUnits ~= nil and type(data.SelectedQuirkUnits) == "table" then
+                State.SelectedQuirkUnits = data.SelectedQuirkUnits
+            end
+            if data.SelectedQuirks ~= nil and type(data.SelectedQuirks) == "table" then
+                State.SelectedQuirks = data.SelectedQuirks
+            end
+            if data.AutoGrades ~= nil then State.AutoGrades = (data.AutoGrades == true) end
+            if data.SelectedGradeUnits ~= nil and type(data.SelectedGradeUnits) == "table" then
+                State.SelectedGradeUnits = data.SelectedGradeUnits
+            end
+            if data.SelectedGrades ~= nil and type(data.SelectedGrades) == "table" then
+                State.SelectedGrades = data.SelectedGrades
+            end
+            if data.AutoTraits ~= nil then State.AutoTraits = (data.AutoTraits == true) end
+            if data.SelectedTraitUnits ~= nil and type(data.SelectedTraitUnits) == "table" then
+                State.SelectedTraitUnits = data.SelectedTraitUnits
+            end
+            if data.SelectedTraits ~= nil and type(data.SelectedTraits) == "table" then
+                State.SelectedTraits = data.SelectedTraits
+            end
             if data.AutoUsePotions ~= nil then State.AutoUsePotions = (data.AutoUsePotions == true) end
             if data.AutoUsePotionTypes ~= nil and type(data.AutoUsePotionTypes) == "table" then
                 State.AutoUsePotionTypes = data.AutoUsePotionTypes
@@ -472,7 +487,20 @@ local replDefault = "isSelected = (Settings.Default == i or Settings.Default == 
 rawMaclibSource = rawMaclibSource:gsub(patDefault, replDefault)
 
 local patUpdateSel = "function DropdownFunctions:UpdateSelection%(newSelection%)"
-local replUpdateSel = "function DropdownFunctions:UpdateSelection(newSelection)\n\t\t\t\t\t\tif type(newSelection) == 'string' then newSelection = { newSelection } end"
+local replUpdateSel = [[function DropdownFunctions:UpdateSelection(newSelection)
+						if type(newSelection) == "string" or type(newSelection) == "number" then
+							newSelection = { newSelection }
+						elseif type(newSelection) == "table" then
+							local flat = {}
+							for k, v in pairs(newSelection) do
+								if type(k) == "number" then
+									table.insert(flat, v)
+								elseif v == true then
+									table.insert(flat, k)
+								end
+							end
+							newSelection = flat
+						end]]
 rawMaclibSource = rawMaclibSource:gsub(patUpdateSel, replUpdateSel)
 
 local patSliderMinMax = "function SectionFunctions:Slider%(Settings, Flag%)"
@@ -1002,7 +1030,8 @@ local PlotSections = {
 
 local HubSections = {
     Quirks = Tabs.Hub:Section({ Side = "Left" }),
-    Right = Tabs.Hub:Section({ Side = "Right" })
+    Grades = Tabs.Hub:Section({ Side = "Right" }),
+    Traits = Tabs.Hub:Section({ Side = "Left" })
 }
 
 local StatsSections = {
@@ -1749,10 +1778,10 @@ local function ResolveSelectedUnitIds(selectedUnits)
     return targetUnitIds
 end
 
-local function GetSelectedQuirksMap(selectedQuirks)
+local function ToLookupMap(selection)
     local map = {}
-    if type(selectedQuirks) == "table" then
-        for k, v in pairs(selectedQuirks) do
+    if type(selection) == "table" then
+        for k, v in pairs(selection) do
             if type(k) == "number" then
                 map[v] = true
             elseif v == true then
@@ -1762,6 +1791,9 @@ local function GetSelectedQuirksMap(selectedQuirks)
     end
     return map
 end
+local GetSelectedQuirksMap = ToLookupMap
+local GetSelectedGradesMap = ToLookupMap
+local GetSelectedTraitsMap = ToLookupMap
 
 HubSections.Quirks:Header({ Text = "Auto Quirks" })
 
@@ -1774,13 +1806,11 @@ HubSections.Quirks:Toggle({
     end
 }, "Toggle_AutoQuirks")
 
-local initialUnitOptions = GetAvailableUnitOptions()
-
 local QuirkUnitsDropdown = HubSections.Quirks:Dropdown({
     Name = "Select Unit",
     Multi = true,
     Required = false,
-    Options = initialUnitOptions,
+    Options = GetAvailableUnitOptions(),
     Default = State.SelectedQuirkUnits or {},
     Callback = function(selected)
         State.SelectedQuirkUnits = selected
@@ -1788,19 +1818,141 @@ local QuirkUnitsDropdown = HubSections.Quirks:Dropdown({
     end
 }, "Dropdown_QuirkUnits")
 
-local allQuirkOptions = {
-    "Fortune I", "Wealth I", "Refined I", "Gifted I", "Swift I",
-    "Fortune II", "Wealth II", "Refined II", "Gifted II", "Swift II",
-    "Fortune III", "Wealth III", "Refined III", "Gifted III", "Swift III",
-    "Tycoon", "Prodigy", "Midas Touch", "Fortune's Favor"
-}
+-- Dynamic Quirk and Grade Options Extractors (Auto-updates with game patches)
+local function GetDynamicQuirkOptions()
+    local quirksList = {}
+    pcall(function()
+        local quirksModule = ReplicatedStorage:FindFirstChild("Framework")
+            and ReplicatedStorage.Framework:FindFirstChild("Features")
+            and ReplicatedStorage.Framework.Features:FindFirstChild("Quirks")
+            and ReplicatedStorage.Framework.Features.Quirks:FindFirstChild("Quirks")
+        if quirksModule then
+            local data = require(quirksModule)
+            if type(data) == "table" then
+                local items = {}
+                for name, info in pairs(data) do
+                    local ord = (type(info) == "table" and info.order) or 0
+                    table.insert(items, { name = tostring(name), order = ord })
+                end
+                table.sort(items, function(a, b)
+                    if a.order ~= b.order then
+                        return a.order > b.order
+                    end
+                    return a.name < b.name
+                end)
+                for _, item in ipairs(items) do
+                    table.insert(quirksList, item.name)
+                end
+            end
+        end
+    end)
+    return quirksList
+end
 
-HubSections.Quirks:Dropdown({
+local function GetDynamicGradeOptions()
+    local gradesList = {}
+    pcall(function()
+        local gradesModule = ReplicatedStorage:FindFirstChild("Framework")
+            and ReplicatedStorage.Framework:FindFirstChild("Features")
+            and ReplicatedStorage.Framework.Features:FindFirstChild("Grades")
+            and ReplicatedStorage.Framework.Features.Grades:FindFirstChild("Grades")
+        if gradesModule then
+            local data = require(gradesModule)
+            if type(data) == "table" then
+                local items = {}
+                for name, info in pairs(data) do
+                    local ord = (type(info) == "table" and info.order) or 0
+                    table.insert(items, { name = tostring(name), order = ord })
+                end
+                table.sort(items, function(a, b)
+                    if a.order ~= b.order then
+                        return a.order > b.order
+                    end
+                    return a.name < b.name
+                end)
+                for _, item in ipairs(items) do
+                    table.insert(gradesList, item.name)
+                end
+            end
+        end
+    end)
+    return gradesList
+end
+
+local function GetDynamicTraitOptions()
+    local traitsList = {}
+    pcall(function()
+        local traitsModule = ReplicatedStorage:FindFirstChild("Framework")
+            and ReplicatedStorage.Framework:FindFirstChild("Features")
+            and ReplicatedStorage.Framework.Features:FindFirstChild("Traits")
+            and ReplicatedStorage.Framework.Features.Traits:FindFirstChild("Traits")
+        if traitsModule then
+            local data = require(traitsModule)
+            if type(data) == "table" then
+                local items = {}
+                for name, info in pairs(data) do
+                    local ord = (type(info) == "table" and info.order) or 0
+                    table.insert(items, { name = tostring(name), order = ord })
+                end
+                table.sort(items, function(a, b)
+                    if a.order ~= b.order then
+                        return a.order > b.order
+                    end
+                    return a.name < b.name
+                end)
+                for _, item in ipairs(items) do
+                    table.insert(traitsList, item.name)
+                end
+            end
+        end
+    end)
+    return traitsList
+end
+
+local function RefreshDropdownPreservingSelection(dropdown, getNewOptionsFunc, currentSelectionState, mapUnitPodium)
+    if not dropdown or not dropdown.ClearOptions or not dropdown.InsertOptions then return end
+    local savedList = NormalizeSelectionList(currentSelectionState)
+    local newOptions = getNewOptionsFunc()
+    if not newOptions or #newOptions == 0 then return end
+
+    local preserved = {}
+    for _, item in ipairs(savedList) do
+        if table.find(newOptions, item) then
+            table.insert(preserved, item)
+        elseif mapUnitPodium then
+            local podiumNum = item:match("%[Podium (%d+)%]")
+            if podiumNum then
+                for _, opt in ipairs(newOptions) do
+                    if opt:match("%[Podium " .. podiumNum .. "%]") then
+                        table.insert(preserved, opt)
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    if #preserved == 0 and #savedList > 0 and not mapUnitPodium then
+        preserved = savedList
+    end
+
+    if dropdown.Settings then
+        dropdown.Settings.Default = preserved
+    end
+
+    dropdown:ClearOptions()
+    dropdown:InsertOptions(newOptions)
+    if dropdown.UpdateSelection and #preserved > 0 then
+        dropdown:UpdateSelection(preserved)
+    end
+end
+
+local QuirkTargetsDropdown = HubSections.Quirks:Dropdown({
     Name = "Select Quirk",
     Multi = true,
     Required = false,
-    Options = allQuirkOptions,
-    Default = State.SelectedQuirks or { "Fortune III", "Tycoon", "Prodigy", "Midas Touch", "Fortune's Favor" },
+    Options = GetDynamicQuirkOptions(),
+    Default = State.SelectedQuirks or { "Fortune's Favor", "Midas Touch", "Prodigy", "Tycoon", "Fortune III" },
     Callback = function(selected)
         State.SelectedQuirks = selected
         SaveConfigDebounced()
@@ -1808,25 +1960,109 @@ HubSections.Quirks:Dropdown({
 }, "Dropdown_QuirkTargets")
 
 HubSections.Quirks:Button({
-    Name = "Refresh Unit List",
+    Name = "Refresh List",
     Callback = function()
         pcall(function()
-            local newOptions = GetAvailableUnitOptions()
-            if QuirkUnitsDropdown and QuirkUnitsDropdown.ClearOptions and QuirkUnitsDropdown.InsertOptions then
-                QuirkUnitsDropdown:ClearOptions()
-                QuirkUnitsDropdown:InsertOptions(newOptions)
-                if State.SelectedQuirkUnits then
-                    QuirkUnitsDropdown:UpdateSelection(State.SelectedQuirkUnits)
-                end
-            end
+            RefreshDropdownPreservingSelection(QuirkUnitsDropdown, GetAvailableUnitOptions, State.SelectedQuirkUnits, true)
+            RefreshDropdownPreservingSelection(QuirkTargetsDropdown, GetDynamicQuirkOptions, State.SelectedQuirks, false)
         end)
     end
 })
 
-HubSections.Right:Header({ Text = "Quirks Information" })
-HubSections.Right:Label({ Text = "Quirks boost stats when placed on podiums" })
-HubSections.Right:Label({ Text = "Top Tiers: Fortune III, Wealth III, Tycoon, Prodigy" })
-HubSections.Right:Label({ Text = "Secrets: Midas Touch, Fortune's Favor" })
+
+-- 9.6. HUB TAB: AUTO GRADES
+HubSections.Grades:Header({ Text = "Auto Grades" })
+
+HubSections.Grades:Toggle({
+    Name = "Auto Grades",
+    Default = (State.AutoGrades == true),
+    Callback = function(v)
+        State.AutoGrades = v
+        SaveConfigDebounced()
+    end
+}, "Toggle_AutoGrades")
+
+local GradeUnitsDropdown = HubSections.Grades:Dropdown({
+    Name = "Select Unit",
+    Multi = true,
+    Required = false,
+    Options = GetAvailableUnitOptions(),
+    Default = State.SelectedGradeUnits or {},
+    Callback = function(selected)
+        State.SelectedGradeUnits = selected
+        SaveConfigDebounced()
+    end
+}, "Dropdown_GradeUnits")
+
+local GradeTargetsDropdown = HubSections.Grades:Dropdown({
+    Name = "Select Grades",
+    Multi = true,
+    Required = false,
+    Options = GetDynamicGradeOptions(),
+    Default = State.SelectedGrades or { "Ω", "∞", "神", "Z+", "Z" },
+    Callback = function(selected)
+        State.SelectedGrades = selected
+        SaveConfigDebounced()
+    end
+}, "Dropdown_GradeTargets")
+
+HubSections.Grades:Button({
+    Name = "Refresh List",
+    Callback = function()
+        pcall(function()
+            RefreshDropdownPreservingSelection(GradeUnitsDropdown, GetAvailableUnitOptions, State.SelectedGradeUnits, true)
+            RefreshDropdownPreservingSelection(GradeTargetsDropdown, GetDynamicGradeOptions, State.SelectedGrades, false)
+        end)
+    end
+})
+
+
+-- 9.7. HUB TAB: AUTO TRAITS
+HubSections.Traits:Header({ Text = "Auto Traits" })
+
+HubSections.Traits:Toggle({
+    Name = "Auto Traits",
+    Default = (State.AutoTraits == true),
+    Callback = function(v)
+        State.AutoTraits = v
+        SaveConfigDebounced()
+    end
+}, "Toggle_AutoTraits")
+
+local TraitUnitsDropdown = HubSections.Traits:Dropdown({
+    Name = "Select Unit",
+    Multi = true,
+    Required = false,
+    Options = GetAvailableUnitOptions(),
+    Default = State.SelectedTraitUnits or {},
+    Callback = function(selected)
+        State.SelectedTraitUnits = selected
+        SaveConfigDebounced()
+    end
+}, "Dropdown_TraitUnits")
+
+local TraitTargetsDropdown = HubSections.Traits:Dropdown({
+    Name = "Select Traits",
+    Multi = true,
+    Required = false,
+    Options = GetDynamicTraitOptions(),
+    Default = State.SelectedTraits or { "Genesis", "Paradox", "Eternal", "Transcendent", "Monarch" },
+    Callback = function(selected)
+        State.SelectedTraits = selected
+        SaveConfigDebounced()
+    end
+}, "Dropdown_TraitTargets")
+
+HubSections.Traits:Button({
+    Name = "Refresh List",
+    Callback = function()
+        pcall(function()
+            RefreshDropdownPreservingSelection(TraitUnitsDropdown, GetAvailableUnitOptions, State.SelectedTraitUnits, true)
+            RefreshDropdownPreservingSelection(TraitTargetsDropdown, GetDynamicTraitOptions, State.SelectedTraits, false)
+        end)
+    end
+})
+
 
 -- ==============================================================================
 -- 10. STATS & CODES TAB
@@ -2009,11 +2245,39 @@ LoadConfig = function()
         end
         if data.SelectedQuirkUnits ~= nil and type(data.SelectedQuirkUnits) == "table" and MacLib.Options["Dropdown_QuirkUnits"] then
             State.SelectedQuirkUnits = data.SelectedQuirkUnits
-            pcall(function() MacLib.Options["Dropdown_QuirkUnits"]:UpdateSelection(State.SelectedQuirkUnits) end)
+            pcall(function() MacLib.Options["Dropdown_QuirkUnits"]:UpdateSelection(NormalizeSelectionList(State.SelectedQuirkUnits)) end)
         end
         if data.SelectedQuirks ~= nil and type(data.SelectedQuirks) == "table" and MacLib.Options["Dropdown_QuirkTargets"] then
             State.SelectedQuirks = data.SelectedQuirks
-            pcall(function() MacLib.Options["Dropdown_QuirkTargets"]:UpdateSelection(State.SelectedQuirks) end)
+            pcall(function() MacLib.Options["Dropdown_QuirkTargets"]:UpdateSelection(NormalizeSelectionList(State.SelectedQuirks)) end)
+        end
+        if data.AutoGrades ~= nil then
+            State.AutoGrades = (data.AutoGrades == true)
+            if MacLib.Options["Toggle_AutoGrades"] then
+                pcall(function() MacLib.Options["Toggle_AutoGrades"]:UpdateState(State.AutoGrades) end)
+            end
+        end
+        if data.SelectedGradeUnits ~= nil and type(data.SelectedGradeUnits) == "table" and MacLib.Options["Dropdown_GradeUnits"] then
+            State.SelectedGradeUnits = data.SelectedGradeUnits
+            pcall(function() MacLib.Options["Dropdown_GradeUnits"]:UpdateSelection(NormalizeSelectionList(State.SelectedGradeUnits)) end)
+        end
+        if data.SelectedGrades ~= nil and type(data.SelectedGrades) == "table" and MacLib.Options["Dropdown_GradeTargets"] then
+            State.SelectedGrades = data.SelectedGrades
+            pcall(function() MacLib.Options["Dropdown_GradeTargets"]:UpdateSelection(NormalizeSelectionList(State.SelectedGrades)) end)
+        end
+        if data.AutoTraits ~= nil then
+            State.AutoTraits = (data.AutoTraits == true)
+            if MacLib.Options["Toggle_AutoTraits"] then
+                pcall(function() MacLib.Options["Toggle_AutoTraits"]:UpdateState(State.AutoTraits) end)
+            end
+        end
+        if data.SelectedTraitUnits ~= nil and type(data.SelectedTraitUnits) == "table" and MacLib.Options["Dropdown_TraitUnits"] then
+            State.SelectedTraitUnits = data.SelectedTraitUnits
+            pcall(function() MacLib.Options["Dropdown_TraitUnits"]:UpdateSelection(NormalizeSelectionList(State.SelectedTraitUnits)) end)
+        end
+        if data.SelectedTraits ~= nil and type(data.SelectedTraits) == "table" and MacLib.Options["Dropdown_TraitTargets"] then
+            State.SelectedTraits = data.SelectedTraits
+            pcall(function() MacLib.Options["Dropdown_TraitTargets"]:UpdateSelection(NormalizeSelectionList(State.SelectedTraits)) end)
         end
 
         -- 2.5 Potions & Boosts
@@ -2535,8 +2799,10 @@ SpawnTracked(function()
     end
 end)
 
--- Worker 3.10: Auto Quirks Loop
+-- Worker 3.10: Auto Quirks Loop (Maximum possible speed without server rejection)
 SpawnTracked(function()
+    local QUIRK_ROLL_DELAY = 0.202 -- Server debounce is strictly 0.20s (DebounceUtil.Try)
+
     while isScriptRunning do
         if State.AutoQuirks and RollQuirkRE and DataController and QuirkUtil then
             pcall(function()
@@ -2556,7 +2822,7 @@ SpawnTracked(function()
                             })
                         end)
                     end
-                    task.wait(1)
+                    task.wait(0.5)
                     return
                 end
 
@@ -2576,13 +2842,12 @@ SpawnTracked(function()
                             })
                         end)
                     end
-                    task.wait(1)
+                    task.wait(0.5)
                     return
                 end
 
                 local inv = DataController.Inventory and DataController.Inventory() or {}
                 local currentMoney = DataController.Money and DataController.Money() or 0
-                local ROLL_DELAY = 0.205 -- Server minimum debounce is 0.20s; 0.205s provides maximum speed with 0 dropped rolls
 
                 -- Find all units that still need a target quirk
                 local pendingUnits = {}
@@ -2613,8 +2878,8 @@ SpawnTracked(function()
                                 })
                             end)
                         end
-                        task.wait(1)
                     end
+                    task.wait(0.5)
                     return
                 end
 
@@ -2625,16 +2890,310 @@ SpawnTracked(function()
                     local cost = QuirkUtil.GetRollCost(unitItem.name, unitItem.attributes) or 0
                     if currentMoney >= cost then
                         RollQuirkRE:FireServer(activeUnitId, true)
-                        task.wait(ROLL_DELAY)
+                        task.wait(QUIRK_ROLL_DELAY)
                     else
-                        task.wait(1)
+                        task.wait(0.5)
                     end
+                else
+                    task.wait(0.1)
                 end
             end)
         else
-            task.wait(1)
+            task.wait(0.5)
         end
-        task.wait(0.05)
+    end
+end)
+
+-- Worker 3.11: Auto Grades Loop (Maximum possible speed without server rejection)
+SpawnTracked(function()
+    local GRADE_ROLL_DELAY = 0.252 -- Server debounce is strictly 0.25s (DebounceUtil.Try)
+
+    while isScriptRunning do
+        if State.AutoGrades and RollGradeRE and DataController then
+            pcall(function()
+                local targetGradesMap = GetSelectedGradesMap(State.SelectedGrades)
+                if not next(targetGradesMap) then
+                    State.AutoGrades = false
+                    if MacLib.Options["Toggle_AutoGrades"] then
+                        pcall(function() MacLib.Options["Toggle_AutoGrades"]:UpdateState(false) end)
+                    end
+                    SaveConfigDebounced()
+                    if Window and Window.Notify then
+                        pcall(function()
+                            Window:Notify({
+                                Title = "Auto Grades",
+                                Description = "No target grades selected!",
+                                Lifetime = 3
+                            })
+                        end)
+                    end
+                    task.wait(0.5)
+                    return
+                end
+
+                local targetUnitIds = ResolveSelectedUnitIds(State.SelectedGradeUnits)
+                if not next(targetUnitIds) then
+                    State.AutoGrades = false
+                    if MacLib.Options["Toggle_AutoGrades"] then
+                        pcall(function() MacLib.Options["Toggle_AutoGrades"]:UpdateState(false) end)
+                    end
+                    SaveConfigDebounced()
+                    if Window and Window.Notify then
+                        pcall(function()
+                            Window:Notify({
+                                Title = "Auto Grades",
+                                Description = "No units selected to roll grades for!",
+                                Lifetime = 3
+                            })
+                        end)
+                    end
+                    task.wait(0.5)
+                    return
+                end
+
+                local inv = DataController.Inventory and DataController.Inventory() or {}
+
+                -- Verify currency: Grade rolls cost Gems (inv item where name == "Gems" or name == "Gem")
+                local gemsAmount = 0
+                for _, item in pairs(inv) do
+                    if item and (item.name == "Gems" or item.name == "Gem") then
+                        gemsAmount = item.amount or 0
+                        break
+                    end
+                end
+
+                if gemsAmount < 1 then
+                    State.AutoGrades = false
+                    if MacLib.Options["Toggle_AutoGrades"] then
+                        pcall(function() MacLib.Options["Toggle_AutoGrades"]:UpdateState(false) end)
+                    end
+                    SaveConfigDebounced()
+                    if Window and Window.Notify then
+                        pcall(function()
+                            Window:Notify({
+                                Title = "Auto Grades",
+                                Description = "You don't have any gems left to roll grades!",
+                                Lifetime = 3
+                            })
+                        end)
+                    end
+                    task.wait(0.5)
+                    return
+                end
+
+                -- Identify units that haven't reached target grade yet
+                local pendingUnits = {}
+                for unitId, _ in pairs(targetUnitIds) do
+                    local unitItem = inv[unitId]
+                    if unitItem and unitItem.attributes then
+                        local curGrade = unitItem.attributes.grade or "None"
+                        if not targetGradesMap[curGrade] then
+                            table.insert(pendingUnits, unitId)
+                        end
+                    end
+                end
+
+                -- If all selected units have reached their target grades, shut off
+                if #pendingUnits == 0 then
+                    if isScriptRunning and State.AutoGrades then
+                        State.AutoGrades = false
+                        if MacLib.Options["Toggle_AutoGrades"] then
+                            pcall(function() MacLib.Options["Toggle_AutoGrades"]:UpdateState(false) end)
+                        end
+                        SaveConfigDebounced()
+                        if Window and Window.Notify then
+                            pcall(function()
+                                Window:Notify({
+                                    Title = "Auto Grades",
+                                    Description = "All selected units have acquired target grades!",
+                                    Lifetime = 4
+                                })
+                            end)
+                        end
+                    end
+                    task.wait(0.5)
+                    return
+                end
+
+                -- Purely Sequential: Focus rolls on the first pending unit until it reaches a target grade
+                local activeUnitId = pendingUnits[1]
+                local unitItem = inv[activeUnitId]
+                if unitItem and unitItem.attributes then
+                    RollGradeRE:FireServer(activeUnitId, true)
+                    task.wait(GRADE_ROLL_DELAY)
+                else
+                    task.wait(0.1)
+                end
+            end)
+        else
+            task.wait(0.5)
+        end
+    end
+end)
+
+-- Worker 3.12: Auto Traits Loop (Maximum possible speed without server rejection)
+SpawnTracked(function()
+    local TRAIT_ROLL_DELAY = 0.252 -- Server debounce is strictly 0.25s (DebounceUtil.Try)
+
+    while isScriptRunning do
+        if State.AutoTraits and RollTraitRE and DataController then
+            pcall(function()
+                local targetTraitsMap = GetSelectedTraitsMap(State.SelectedTraits)
+                if not next(targetTraitsMap) then
+                    State.AutoTraits = false
+                    if MacLib.Options["Toggle_AutoTraits"] then
+                        pcall(function() MacLib.Options["Toggle_AutoTraits"]:UpdateState(false) end)
+                    end
+                    SaveConfigDebounced()
+                    if Window and Window.Notify then
+                        pcall(function()
+                            Window:Notify({
+                                Title = "Auto Traits",
+                                Description = "No target traits selected!",
+                                Lifetime = 3
+                            })
+                        end)
+                    end
+                    task.wait(0.5)
+                    return
+                end
+
+                local targetUnitIds = ResolveSelectedUnitIds(State.SelectedTraitUnits)
+                if not next(targetUnitIds) then
+                    State.AutoTraits = false
+                    if MacLib.Options["Toggle_AutoTraits"] then
+                        pcall(function() MacLib.Options["Toggle_AutoTraits"]:UpdateState(false) end)
+                    end
+                    SaveConfigDebounced()
+                    if Window and Window.Notify then
+                        pcall(function()
+                            Window:Notify({
+                                Title = "Auto Traits",
+                                Description = "No units selected to roll traits for!",
+                                Lifetime = 3
+                            })
+                        end)
+                    end
+                    task.wait(0.5)
+                    return
+                end
+
+                local inv = DataController.Inventory and DataController.Inventory() or {}
+
+                -- Verify currency: Trait rolls cost "Trait Reroll" item
+                local traitRerolls = 0
+                if inv["Trait Reroll"] and inv["Trait Reroll"].amount then
+                    traitRerolls = tonumber(inv["Trait Reroll"].amount) or 0
+                else
+                    for _, item in pairs(inv) do
+                        if item and item.name == "Trait Reroll" then
+                            traitRerolls = traitRerolls + (tonumber(item.amount) or 1)
+                        end
+                    end
+                end
+
+                if traitRerolls < 1 then
+                    State.AutoTraits = false
+                    if MacLib.Options["Toggle_AutoTraits"] then
+                        pcall(function() MacLib.Options["Toggle_AutoTraits"]:UpdateState(false) end)
+                    end
+                    SaveConfigDebounced()
+                    if Window and Window.Notify then
+                        pcall(function()
+                            Window:Notify({
+                                Title = "Auto Traits",
+                                Description = "You don't have any Trait Rerolls left!",
+                                Lifetime = 3
+                            })
+                        end)
+                    end
+                    task.wait(0.5)
+                    return
+                end
+
+                -- Identify units that haven't reached target trait yet
+                local pendingUnits = {}
+                for unitId, _ in pairs(targetUnitIds) do
+                    local unitItem = inv[unitId]
+                    if unitItem and unitItem.attributes then
+                        local curTrait = unitItem.attributes.trait or "None"
+                        if not targetTraitsMap[curTrait] then
+                            table.insert(pendingUnits, unitId)
+                        end
+                    end
+                end
+
+                -- If all selected units have reached target traits, shut off
+                if #pendingUnits == 0 then
+                    if isScriptRunning and State.AutoTraits then
+                        State.AutoTraits = false
+                        if MacLib.Options["Toggle_AutoTraits"] then
+                            pcall(function() MacLib.Options["Toggle_AutoTraits"]:UpdateState(false) end)
+                        end
+                        SaveConfigDebounced()
+                        if Window and Window.Notify then
+                            pcall(function()
+                                Window:Notify({
+                                    Title = "Auto Traits",
+                                    Description = "All selected units have acquired target traits!",
+                                    Lifetime = 4
+                                })
+                            end)
+                        end
+                    end
+                    task.wait(0.5)
+                    return
+                end
+
+                -- Purely Sequential: Focus continuous rolls on the first pending unit until it succeeds, then advance
+                local activeUnitId = pendingUnits[1]
+                local unitItem = inv[activeUnitId]
+                if unitItem and unitItem.attributes then
+                    RollTraitRE:FireServer(activeUnitId, true)
+                    task.wait(TRAIT_ROLL_DELAY)
+                else
+                    task.wait(0.1)
+                end
+            end)
+        else
+            task.wait(0.5)
+        end
+    end
+end)
+
+-- Worker 3.13: Live Quirk, Grade & Trait Options Auto-Updater (Detects new game updates dynamically)
+SpawnTracked(function()
+    local lastQuirkCount = #GetDynamicQuirkOptions()
+    local lastGradeCount = #GetDynamicGradeOptions()
+    local lastTraitCount = #GetDynamicTraitOptions()
+
+    while isScriptRunning do
+        task.wait(10)
+        pcall(function()
+            if QuirkTargetsDropdown and QuirkTargetsDropdown.ClearOptions and QuirkTargetsDropdown.InsertOptions then
+                local currentQuirks = GetDynamicQuirkOptions()
+                if #currentQuirks ~= lastQuirkCount then
+                    lastQuirkCount = #currentQuirks
+                    RefreshDropdownPreservingSelection(QuirkTargetsDropdown, GetDynamicQuirkOptions, State.SelectedQuirks, false)
+                end
+            end
+
+            if GradeTargetsDropdown and GradeTargetsDropdown.ClearOptions and GradeTargetsDropdown.InsertOptions then
+                local currentGrades = GetDynamicGradeOptions()
+                if #currentGrades ~= lastGradeCount then
+                    lastGradeCount = #currentGrades
+                    RefreshDropdownPreservingSelection(GradeTargetsDropdown, GetDynamicGradeOptions, State.SelectedGrades, false)
+                end
+            end
+
+            if TraitTargetsDropdown and TraitTargetsDropdown.ClearOptions and TraitTargetsDropdown.InsertOptions then
+                local currentTraits = GetDynamicTraitOptions()
+                if #currentTraits ~= lastTraitCount then
+                    lastTraitCount = #currentTraits
+                    RefreshDropdownPreservingSelection(TraitTargetsDropdown, GetDynamicTraitOptions, State.SelectedTraits, false)
+                end
+            end
+        end)
     end
 end)
 
