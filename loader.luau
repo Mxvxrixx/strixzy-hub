@@ -14,6 +14,9 @@ local GameRegistry = {
     [110388679506690] = "games/AnimeMysterious.luau", -- Alt Lobby
     [107610426295102] = "games/AnimeMysterious.luau", -- Gameplay
     [97246719761307]  = "games/AnimeMysterious.luau", -- Secondary Battle
+
+    -- [Anime Dice]
+    [113290951185459] = "games/AnimeDice.luau", -- Main Game
 }
 
 local scriptPath = GameRegistry[game.PlaceId]
