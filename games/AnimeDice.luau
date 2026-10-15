@@ -178,6 +178,10 @@ local QuirkUtil = nil
 pcall(function()
     QuirkUtil = require(ReplicatedStorage.Framework.Features.Quirks.QuirkUtil)
 end)
+local PlotConfig = nil
+pcall(function()
+    PlotConfig = require(ReplicatedStorage.Framework.Features.Plot.PlotConfig)
+end)
 
 -- Network Remotes (Defensive Fallback)
 local Network = ReplicatedStorage:WaitForChild("Network", 15)
@@ -197,6 +201,7 @@ local UpdateAutoSellRE = GetRemote("SellService", "RE", "UpdateAutoSell")
 local EquipBestRE     = GetRemote("PlotService", "RE", "EquipBest")
 local InteractSlotRE  = GetRemote("PlotService", "RE", "InteractSlot")
 local UnequipRF       = GetRemote("UnitService", "RF", "Unequip")
+local EquipRF         = GetRemote("UnitService", "RF", "Equip")
 local LevelUpSlotRE   = GetRemote("PlotService", "RE", "LevelUpSlot")
 local CollectBalanceRE = GetRemote("PlotService", "RE", "CollectBalance")
 local RedeemCodeRE    = GetRemote("CodesService", "RE", "RedeemCode")
@@ -258,6 +263,9 @@ local State = {
     CollectInterval = 5,
     AutoEquipBest = false,
     EquipBestInterval = 15,
+    AutoEquipQuirks = false,
+    SelectedEquipQuirks = { "Fortune's Favor", "Midas Touch", "Prodigy", "Tycoon" },
+    EquipQuirksInterval = 15,
     AutoUpgradePlot = false,
     PlotTargetLevel = 100,
 
@@ -335,6 +343,9 @@ local function SaveConfig()
         CollectInterval = tonumber(State.CollectInterval) or 5,
         AutoEquipBest = (State.AutoEquipBest == true),
         EquipBestInterval = tonumber(State.EquipBestInterval) or 15,
+        AutoEquipQuirks = (State.AutoEquipQuirks == true),
+        SelectedEquipQuirks = NormalizeSelectionList(State.SelectedEquipQuirks, { "Fortune's Favor", "Midas Touch", "Prodigy", "Tycoon" }),
+        EquipQuirksInterval = tonumber(State.EquipQuirksInterval) or 15,
         AutoUpgradePlot = (State.AutoUpgradePlot == true),
         PlotTargetLevel = tonumber(State.PlotTargetLevel) or 100,
         AcrylicBlur = (State.AcrylicBlur == true),
@@ -410,6 +421,11 @@ if isfile and isfile(ConfigFile) then
             if data.CollectInterval then State.CollectInterval = tonumber(data.CollectInterval) or 5 end
             if data.AutoEquipBest ~= nil then State.AutoEquipBest = (data.AutoEquipBest == true) end
             if data.EquipBestInterval then State.EquipBestInterval = tonumber(data.EquipBestInterval) or 15 end
+            if data.AutoEquipQuirks ~= nil then State.AutoEquipQuirks = (data.AutoEquipQuirks == true) end
+            if data.SelectedEquipQuirks ~= nil and type(data.SelectedEquipQuirks) == "table" then
+                State.SelectedEquipQuirks = data.SelectedEquipQuirks
+            end
+            if data.EquipQuirksInterval then State.EquipQuirksInterval = tonumber(data.EquipQuirksInterval) or 15 end
             if data.AutoUpgradePlot ~= nil then State.AutoUpgradePlot = (data.AutoUpgradePlot == true) end
             if data.PlotTargetLevel then State.PlotTargetLevel = tonumber(data.PlotTargetLevel) or 100 end
             if data.AcrylicBlur ~= nil then State.AcrylicBlur = (data.AcrylicBlur == true) end
@@ -1025,7 +1041,8 @@ local ProgressionSections = {
 local PlotSections = {
     Collect = Tabs.Plots:Section({ Side = "Left" }),
     Upgrade = Tabs.Plots:Section({ Side = "Left" }),
-    Right = Tabs.Plots:Section({ Side = "Right" })
+    Right = Tabs.Plots:Section({ Side = "Right" }),
+    QuirksEquip = Tabs.Plots:Section({ Side = "Right" })
 }
 
 local HubSections = {
@@ -1534,250 +1551,9 @@ PlotSections.Upgrade:Input({
     end
 }, "Input_PlotTargetLevel")
 
-local isEquippingBest = false
-local function AreSlotsSorted()
-    if not (DataController and DataController.Inventory and DataController.Slots and EntryRegistry) then
-        return false
-    end
-    local inventory = DataController.Inventory()
-    local slots = DataController.Slots()
-    if not inventory or not slots then return true end
-
-    local topUnits = {}
-    for key, item in pairs(inventory) do
-        local cfg = EntryRegistry.getEntryConfig(item.name)
-        if cfg and cfg.kind == "Unit" then
-            local inc = 0
-            pcall(function() inc = cfg.income(item.attributes) end)
-            table.insert(topUnits, { key = key, income = inc })
-        end
-    end
-    table.sort(topUnits, function(a, b)
-        if a.income == b.income then return a.key < b.key end
-        return a.income > b.income
-    end)
-
-    local slotNumbers = {}
-    for slotKey, _ in pairs(slots) do
-        local num = tonumber(slotKey)
-        if num then table.insert(slotNumbers, num) end
-    end
-    table.sort(slotNumbers)
-
-    for i, slotNum in ipairs(slotNumbers) do
-        local targetUnit = topUnits[i]
-        local currentSlot = slots[tostring(slotNum)] or slots[slotNum]
-        local currentUnitId = currentSlot and currentSlot.unitId
-        if not targetUnit or currentUnitId ~= targetUnit.key then
-            return false
-        end
-    end
-
-    return true
-end
-
-local function EquipBestSorted(force)
-    if isEquippingBest or not EquipBestRE then return end
-    isEquippingBest = true
-
-    pcall(function()
-        if not force and AreSlotsSorted() then
-            return
-        end
-
-        -- If not in order, unequip Slot 1 so server EquipBest doesn't skip due to top-set matching
-        if InteractSlotRE and UnequipRF then
-            pcall(function()
-                InteractSlotRE:FireServer(1)
-                task.wait(0.55)
-                UnequipRF:InvokeServer()
-                task.wait(0.2)
-            end)
-        end
-
-        EquipBestRE:FireServer()
-    end)
-
-    isEquippingBest = false
-end
-
-PlotSections.Right:Header({ Text = "Auto Equip Plot" })
-
-PlotSections.Right:Toggle({
-    Name = "Auto Equip Best Units",
-    Default = (State.AutoEquipBest == true),
-    Callback = function(v)
-        State.AutoEquipBest = v
-        SaveConfigDebounced()
-    end
-}, "Toggle_AutoEquipBest")
-
-PlotSections.Right:Input({
-    Name = "Equip Best (Seconds)",
-    Placeholder = "e.g. 15",
-    AcceptedCharacters = function(str)
-        return str:gsub("[^0-9]", "")
-    end,
-    Default = tostring(State.EquipBestInterval or 15),
-    Callback = function(text)
-        local num = tonumber(text)
-        if num and num > 0 then
-            State.EquipBestInterval = math.max(1, math.floor(num))
-        else
-            State.EquipBestInterval = 15
-        end
-        SaveConfigDebounced()
-    end
-}, "Input_EquipBestInterval")
-
-PlotSections.Right:Button({
-    Name = "Equip Best Now",
-    Callback = function()
-        task.spawn(function()
-            EquipBestSorted(true)
-        end)
-    end
-})
-
 -- ==============================================================================
--- 9.5. HUB TAB: AUTO QUIRKS
+-- 9. DYNAMIC ATTRIBUTE OPTIONS & HELPERS
 -- ==============================================================================
-local unitOptionToId = {}
-local unitIdToOption = {}
-
-local function GetAvailableUnitOptions()
-    local options = {}
-    unitOptionToId = {}
-    unitIdToOption = {}
-
-    pcall(function()
-        if DataController and DataController.Inventory and EntryRegistry then
-            local inv = DataController.Inventory()
-            local slots = (DataController.Slots and DataController.Slots()) or {}
-            local slotByUnitId = {}
-            for sNum, sData in pairs(slots) do
-                if sData and sData.unitId then
-                    slotByUnitId[sData.unitId] = sNum
-                end
-            end
-
-            local temp = {}
-            for id, item in pairs(inv) do
-                local cfg = EntryRegistry.getEntryConfig(item.name)
-                if cfg and cfg.kind == "Unit" then
-                    local sNum = slotByUnitId[id]
-                    local rawChance = 0
-                    if cfg.chance then
-                        pcall(function() rawChance = cfg.chance(item.attributes) end)
-                    end
-                    table.insert(temp, {
-                        id = id,
-                        name = item.name,
-                        chance = rawChance,
-                        slotNum = tonumber(sNum) or 999,
-                        isSlot = sNum ~= nil
-                    })
-                end
-            end
-
-            table.sort(temp, function(a, b)
-                if a.isSlot ~= b.isSlot then
-                    return a.isSlot
-                end
-                if a.slotNum ~= b.slotNum then
-                    return a.slotNum < b.slotNum
-                end
-                if a.chance ~= b.chance then
-                    return a.chance > b.chance
-                end
-                return a.name < b.name
-            end)
-
-            table.insert(options, "[All Equipped Units]")
-
-            local nameCounts = {}
-            for _, u in ipairs(temp) do
-                local prefix = u.isSlot and ("[Podium " .. tostring(u.slotNum) .. "] ") or ""
-                local formattedChance = (NumberFormatter and NumberFormatter.FormatCompact and NumberFormatter.FormatCompact(u.chance)) or tostring(u.chance)
-                local numPart, sfxPart = formattedChance:match("^([%d%.]+)(%a*)$")
-                if numPart and sfxPart and sfxPart ~= "" then
-                    formattedChance = numPart .. sfxPart:upper()
-                end
-                local chanceStr = "1 in " .. formattedChance
-                local baseLabel = prefix .. u.name .. " (" .. chanceStr .. ")"
-
-                nameCounts[baseLabel] = (nameCounts[baseLabel] or 0) + 1
-                local finalLabel = baseLabel
-                if nameCounts[baseLabel] > 1 then
-                    finalLabel = baseLabel .. " #" .. tostring(nameCounts[baseLabel])
-                end
-
-                table.insert(options, finalLabel)
-                unitOptionToId[finalLabel] = u.id
-                unitIdToOption[u.id] = finalLabel
-            end
-        end
-    end)
-    if #options == 0 then
-        options = { "[All Equipped Units]" }
-    end
-    return options
-end
-
-local function ResolveSelectedUnitIds(selectedUnits)
-    local targetUnitIds = {}
-    local hasAllEquipped = false
-
-    local list = {}
-    if type(selectedUnits) == "table" then
-        for k, v in pairs(selectedUnits) do
-            if type(k) == "number" then
-                table.insert(list, v)
-            elseif v == true then
-                table.insert(list, k)
-            end
-        end
-    end
-
-    local inv = (DataController and DataController.Inventory and DataController.Inventory()) or {}
-    local slots = (DataController and DataController.Slots and DataController.Slots()) or {}
-
-    for _, opt in ipairs(list) do
-        if opt == "[All Equipped Units]" then
-            hasAllEquipped = true
-        elseif unitOptionToId[opt] and inv[unitOptionToId[opt]] then
-            targetUnitIds[unitOptionToId[opt]] = true
-        else
-            -- Robust fallback: match by podium number
-            local podiumNum = opt:match("%[Podium (%d+)%]")
-            if podiumNum and slots[podiumNum] and slots[podiumNum].unitId then
-                targetUnitIds[slots[podiumNum].unitId] = true
-            else
-                -- Fallback to shortId in case config had previous format
-                local shortId = opt:match("#([a-f0-9]+)")
-                if shortId then
-                    for id, _ in pairs(inv) do
-                        if id:sub(1, #shortId) == shortId then
-                            targetUnitIds[id] = true
-                            break
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    if hasAllEquipped then
-        for _, s in pairs(slots) do
-            if s and s.unitId and inv[s.unitId] then
-                targetUnitIds[s.unitId] = true
-            end
-        end
-    end
-
-    return targetUnitIds
-end
-
 local function ToLookupMap(selection)
     local map = {}
     if type(selection) == "table" then
@@ -1795,30 +1571,6 @@ local GetSelectedQuirksMap = ToLookupMap
 local GetSelectedGradesMap = ToLookupMap
 local GetSelectedTraitsMap = ToLookupMap
 
-HubSections.Quirks:Header({ Text = "Auto Quirks" })
-
-HubSections.Quirks:Toggle({
-    Name = "Auto Quirks",
-    Default = (State.AutoQuirks == true),
-    Callback = function(v)
-        State.AutoQuirks = v
-        SaveConfigDebounced()
-    end
-}, "Toggle_AutoQuirks")
-
-local QuirkUnitsDropdown = HubSections.Quirks:Dropdown({
-    Name = "Select Unit",
-    Multi = true,
-    Required = false,
-    Options = GetAvailableUnitOptions(),
-    Default = State.SelectedQuirkUnits or {},
-    Callback = function(selected)
-        State.SelectedQuirkUnits = selected
-        SaveConfigDebounced()
-    end
-}, "Dropdown_QuirkUnits")
-
--- Dynamic Quirk and Grade Options Extractors (Auto-updates with game patches)
 local function GetDynamicQuirkOptions()
     local quirksList = {}
     pcall(function()
@@ -1942,10 +1694,657 @@ local function RefreshDropdownPreservingSelection(dropdown, getNewOptionsFunc, c
 
     dropdown:ClearOptions()
     dropdown:InsertOptions(newOptions)
-    if dropdown.UpdateSelection and #preserved > 0 then
+    if dropdown.UpdateSelection then
         dropdown:UpdateSelection(preserved)
     end
 end
+
+-- ==============================================================================
+-- 9.1 PLOT & UNITS: AUTO EQUIP BEST & AUTO EQUIP QUIRKS
+-- ==============================================================================
+local isEquippingBest = false
+local function AreSlotsSorted()
+    if not (DataController and DataController.Inventory and DataController.Slots and EntryRegistry and PlotConfig) then
+        return false
+    end
+    local inventory = DataController.Inventory()
+    if not inventory then return true end
+
+    local topUnits = {}
+    for key, item in pairs(inventory) do
+        local cfg = EntryRegistry.getEntryConfig(item.name)
+        if cfg and cfg.kind == "Unit" then
+            local inc = 0
+            pcall(function() inc = cfg.income(item.attributes) end)
+            table.insert(topUnits, { key = key, income = inc })
+        end
+    end
+    table.sort(topUnits, function(a, b)
+        if a.income == b.income then return a.key < b.key end
+        return a.income > b.income
+    end)
+
+    local maxSlots = (PlotConfig.GetMaxSlots and PlotConfig.GetMaxSlots()) or 18
+    local rebirth = (DataController.Rebirth and DataController.Rebirth()) or 0
+    local slotNumbers = {}
+    for i = 1, maxSlots do
+        local req = (PlotConfig.GetSlotRebirthRequirement and PlotConfig.GetSlotRebirthRequirement(i)) or 0
+        if req <= rebirth then
+            table.insert(slotNumbers, i)
+        end
+    end
+    table.sort(slotNumbers)
+
+    for i, slotNum in ipairs(slotNumbers) do
+        local targetUnit = topUnits[i]
+        local sNode = DataController.Slots[tostring(slotNum)]
+        local sVal = sNode and sNode()
+        local currentUnitId = sVal and sVal.unitId
+        if not targetUnit or currentUnitId ~= targetUnit.key then
+            return false
+        end
+    end
+
+    return true
+end
+
+local function EquipBestSorted(force)
+    if isEquippingBest or not EquipBestRE then return end
+    isEquippingBest = true
+
+    pcall(function()
+        if not force and AreSlotsSorted() then
+            return
+        end
+
+        -- If not in order, unequip Slot 1 so server EquipBest doesn't skip due to top-set matching
+        if InteractSlotRE and UnequipRF then
+            pcall(function()
+                UnequipRF:InvokeServer()
+                task.wait(0.55)
+                InteractSlotRE:FireServer(1)
+                task.wait(0.55)
+            end)
+        end
+
+        EquipBestRE:FireServer()
+    end)
+
+    isEquippingBest = false
+end
+
+-- Auto Equip Units Quirks Core Logic
+local isEquippingQuirks = false
+
+local function GetQuirksOrderMap()
+    local orderMap = {}
+    pcall(function()
+        local quirksModule = ReplicatedStorage:FindFirstChild("Framework")
+            and ReplicatedStorage.Framework:FindFirstChild("Features")
+            and ReplicatedStorage.Framework.Features:FindFirstChild("Quirks")
+            and ReplicatedStorage.Framework.Features.Quirks:FindFirstChild("Quirks")
+        if quirksModule then
+            local data = require(quirksModule)
+            if type(data) == "table" then
+                for name, info in pairs(data) do
+                    orderMap[tostring(name)] = (type(info) == "table" and info.order) or 0
+                end
+            end
+        end
+    end)
+    return orderMap
+end
+
+local function CalculateQuirksEquipPlan()
+    if not (DataController and DataController.Inventory and DataController.Slots and EntryRegistry and PlotConfig) then
+        return nil, nil
+    end
+
+    local inv = DataController.Inventory and DataController.Inventory()
+    if not inv then return nil, nil end
+
+    local targetQuirksMap = ToLookupMap(State.SelectedEquipQuirks)
+    if not next(targetQuirksMap) then
+        return nil, nil
+    end
+
+    local maxSlots = (PlotConfig.GetMaxSlots and PlotConfig.GetMaxSlots()) or 18
+    local rebirth = (DataController.Rebirth and DataController.Rebirth()) or 0
+
+    local slotNumbers = {}
+    for i = 1, maxSlots do
+        local req = (PlotConfig.GetSlotRebirthRequirement and PlotConfig.GetSlotRebirthRequirement(i)) or 0
+        if req <= rebirth then
+            table.insert(slotNumbers, i)
+        end
+    end
+    table.sort(slotNumbers)
+    local totalSlots = #slotNumbers
+    if totalSlots == 0 then return nil, nil end
+
+    local quirkOrder = GetQuirksOrderMap()
+
+    local eligibleUnits = {}
+    local remainingUnits = {}
+
+    for id, item in pairs(inv) do
+        local cfg = EntryRegistry.getEntryConfig(item.name)
+        if cfg and cfg.kind == "Unit" then
+            local inc = 0
+            if cfg.income then
+                pcall(function() inc = cfg.income(item.attributes) end)
+            end
+            local rawChance = 0
+            if cfg.chance then
+                pcall(function() rawChance = cfg.chance(item.attributes) end)
+            end
+
+            local q = (item.attributes and item.attributes.quirk) or "None"
+            local unitData = {
+                id = id,
+                name = item.name,
+                quirk = q,
+                quirkOrder = quirkOrder[q] or 0,
+                income = inc,
+                chance = rawChance,
+                level = (item.attributes and item.attributes.level) or 1
+            }
+
+            if targetQuirksMap[q] then
+                table.insert(eligibleUnits, unitData)
+            else
+                table.insert(remainingUnits, unitData)
+            end
+        end
+    end
+
+    -- Sort eligibleUnits by quirkOrder descending (strongest quirk first), then income, then chance
+    table.sort(eligibleUnits, function(a, b)
+        if a.quirkOrder ~= b.quirkOrder then
+            return a.quirkOrder > b.quirkOrder
+        end
+        if a.income ~= b.income then
+            return a.income > b.income
+        end
+        if a.chance ~= b.chance then
+            return a.chance > b.chance
+        end
+        return a.id < b.id
+    end)
+
+    -- Sort remainingUnits by income descending (backup fill for lower slots)
+    table.sort(remainingUnits, function(a, b)
+        if a.income ~= b.income then
+            return a.income > b.income
+        end
+        return a.id < b.id
+    end)
+
+    local targetSlotsPlan = {}
+    local usedUnitIds = {}
+
+    -- "ใส่ Quirk ที่โหดที่สุดตามที่เราเลือกจาก Plot สุดท้ายไล่ขึ้นมา"
+    -- Best quirk unit goes into the LAST plot (highest slotNum), 2nd goes into (last - 1), etc.
+    local quirkUnitsToPlace = math.min(#eligibleUnits, totalSlots)
+    for i = 1, quirkUnitsToPlace do
+        local targetSlot = slotNumbers[totalSlots - i + 1]
+        local unit = eligibleUnits[i]
+        targetSlotsPlan[targetSlot] = unit.id
+        usedUnitIds[unit.id] = true
+    end
+
+    -- Fill remaining earlier slots with best remaining units so plot is never starved
+    local remainingSlotCount = totalSlots - quirkUnitsToPlace
+    if remainingSlotCount > 0 then
+        local backupPool = {}
+        for i = quirkUnitsToPlace + 1, #eligibleUnits do
+            table.insert(backupPool, eligibleUnits[i])
+        end
+        for _, u in ipairs(remainingUnits) do
+            table.insert(backupPool, u)
+        end
+        table.sort(backupPool, function(a, b)
+            if a.income ~= b.income then return a.income > b.income end
+            return a.id < b.id
+        end)
+
+        local backupIdx = 1
+        for i = 1, remainingSlotCount do
+            local targetSlot = slotNumbers[i]
+            while backupIdx <= #backupPool and usedUnitIds[backupPool[backupIdx].id] do
+                backupIdx = backupIdx + 1
+            end
+            if backupIdx <= #backupPool then
+                local unit = backupPool[backupIdx]
+                targetSlotsPlan[targetSlot] = unit.id
+                usedUnitIds[unit.id] = true
+                backupIdx = backupIdx + 1
+            end
+        end
+    end
+
+    return targetSlotsPlan, slotNumbers
+end
+
+local function AreQuirksSlotsMatchingPlan(targetSlotsPlan, slotNumbers)
+    if not targetSlotsPlan or not slotNumbers or not DataController or not DataController.Slots then
+        return true
+    end
+
+    for _, sNum in ipairs(slotNumbers) do
+        local targetUnitId = targetSlotsPlan[sNum]
+        local sNode = DataController.Slots[tostring(sNum)]
+        local sVal = sNode and sNode()
+        local curUnitId = sVal and sVal.unitId
+        if targetUnitId ~= curUnitId then
+            return false
+        end
+    end
+    return true
+end
+
+local function EquipQuirksSorted(force)
+    if isEquippingQuirks or not InteractSlotRE or not EquipRF or not UnequipRF then
+        return
+    end
+    isEquippingQuirks = true
+
+    pcall(function()
+        local targetSlotsPlan, slotNumbers = CalculateQuirksEquipPlan()
+        if not targetSlotsPlan or not slotNumbers or #slotNumbers == 0 then
+            isEquippingQuirks = false
+            return
+        end
+
+        if not force and AreQuirksSlotsMatchingPlan(targetSlotsPlan, slotNumbers) then
+            isEquippingQuirks = false
+            return
+        end
+
+        -- Map currently occupied slots
+        local currentSlotUnits = {}
+        for _, sNum in ipairs(slotNumbers) do
+            local sNode = DataController.Slots[tostring(sNum)]
+            local sVal = sNode and sNode()
+            if sVal and sVal.unitId then
+                currentSlotUnits[sNum] = sVal.unitId
+            end
+        end
+
+        -- 1. Identify slots that need to be picked up first
+        -- Slots that have a unit differing from targetSlotsPlan must be cleared
+        -- so the unit returns to inventory and cannot block placement
+        local needsPickup = {}
+        for _, sNum in ipairs(slotNumbers) do
+            local curUnit = currentSlotUnits[sNum]
+            local targetUnit = targetSlotsPlan[sNum]
+            if curUnit and curUnit ~= targetUnit then
+                table.insert(needsPickup, sNum)
+            end
+        end
+
+        if #needsPickup > 0 then
+            pcall(function() UnequipRF:InvokeServer() end)
+            task.wait(0.55)
+            for _, sNum in ipairs(needsPickup) do
+                if not isScriptRunning then break end
+                pcall(function()
+                    InteractSlotRE:FireServer(sNum)
+                end)
+                task.wait(0.55)
+            end
+        end
+
+        -- 2. Equip units into target slots from last plot down to first
+        for i = #slotNumbers, 1, -1 do
+            if not isScriptRunning then break end
+            local sNum = slotNumbers[i]
+            local targetUnitId = targetSlotsPlan[sNum]
+            local sNode = DataController.Slots[tostring(sNum)]
+            local sVal = sNode and sNode()
+            local curUnit = sVal and sVal.unitId
+
+            if targetUnitId and curUnit ~= targetUnitId then
+                pcall(function()
+                    EquipRF:InvokeServer(targetUnitId)
+                end)
+                task.wait(0.55)
+                pcall(function()
+                    InteractSlotRE:FireServer(sNum)
+                end)
+                task.wait(0.55)
+            end
+        end
+
+        pcall(function()
+            UnequipRF:InvokeServer()
+        end)
+    end)
+
+    isEquippingQuirks = false
+end
+
+-- 9.2 PLOT TAB: AUTO EQUIP BEST SECTION
+PlotSections.Right:Header({ Text = "Auto Equip Plot" })
+
+PlotSections.Right:Toggle({
+    Name = "Auto Equip Best Units",
+    Default = (State.AutoEquipBest == true),
+    Callback = function(v)
+        State.AutoEquipBest = v
+        if v and State.AutoEquipQuirks then
+            State.AutoEquipQuirks = false
+            if MacLib.Options["Toggle_AutoEquipQuirks"] then
+                pcall(function() MacLib.Options["Toggle_AutoEquipQuirks"]:UpdateState(false) end)
+            end
+        end
+        SaveConfigDebounced()
+    end
+}, "Toggle_AutoEquipBest")
+
+PlotSections.Right:Input({
+    Name = "Equip Best (Seconds)",
+    Placeholder = "e.g. 15",
+    AcceptedCharacters = function(str)
+        return str:gsub("[^0-9]", "")
+    end,
+    Default = tostring(State.EquipBestInterval or 15),
+    Callback = function(text)
+        local num = tonumber(text)
+        if num and num > 0 then
+            State.EquipBestInterval = math.max(1, math.floor(num))
+        else
+            State.EquipBestInterval = 15
+        end
+        SaveConfigDebounced()
+    end
+}, "Input_EquipBestInterval")
+
+PlotSections.Right:Button({
+    Name = "Equip Best Now",
+    Callback = function()
+        task.spawn(function()
+            EquipBestSorted(true)
+        end)
+    end
+})
+
+-- 9.3 PLOT TAB: AUTO EQUIP UNITS QUIRKS SECTION
+PlotSections.QuirksEquip:Header({ Text = "Auto Equip Units Quirks" })
+
+PlotSections.QuirksEquip:Toggle({
+    Name = "Auto Equip Units Quirks",
+    Default = (State.AutoEquipQuirks == true),
+    Callback = function(v)
+        State.AutoEquipQuirks = v
+        if v then
+            if State.AutoEquipBest then
+                State.AutoEquipBest = false
+                if MacLib.Options["Toggle_AutoEquipBest"] then
+                    pcall(function() MacLib.Options["Toggle_AutoEquipBest"]:UpdateState(false) end)
+                end
+            end
+            task.spawn(function()
+                EquipQuirksSorted(true)
+            end)
+        end
+        SaveConfigDebounced()
+    end
+}, "Toggle_AutoEquipQuirks")
+
+local EquipQuirksDropdown = PlotSections.QuirksEquip:Dropdown({
+    Name = "Select Quirks",
+    Multi = true,
+    Required = false,
+    Options = GetDynamicQuirkOptions(),
+    Default = State.SelectedEquipQuirks or { "Fortune's Favor", "Midas Touch", "Prodigy", "Tycoon" },
+    Callback = function(selected)
+        State.SelectedEquipQuirks = selected
+        SaveConfigDebounced()
+        if State.AutoEquipQuirks then
+            task.spawn(function()
+                EquipQuirksSorted(true)
+            end)
+        end
+    end
+}, "Dropdown_EquipQuirksTargets")
+
+PlotSections.QuirksEquip:Input({
+    Name = "Equip Interval (Seconds)",
+    Placeholder = "e.g. 15",
+    AcceptedCharacters = function(str)
+        return str:gsub("[^0-9]", "")
+    end,
+    Default = tostring(State.EquipQuirksInterval or 15),
+    Callback = function(text)
+        local num = tonumber(text)
+        if num and num > 0 then
+            State.EquipQuirksInterval = math.max(1, math.floor(num))
+        else
+            State.EquipQuirksInterval = 15
+        end
+        SaveConfigDebounced()
+    end
+}, "Input_EquipQuirksInterval")
+
+PlotSections.QuirksEquip:Button({
+    Name = "Equip Quirks Now",
+    Callback = function()
+        task.spawn(function()
+            EquipQuirksSorted(true)
+        end)
+    end
+})
+
+PlotSections.QuirksEquip:Button({
+    Name = "Refresh Quirks List",
+    Callback = function()
+        pcall(function()
+            RefreshDropdownPreservingSelection(EquipQuirksDropdown, GetDynamicQuirkOptions, State.SelectedEquipQuirks, false)
+        end)
+    end
+})
+
+-- ==============================================================================
+-- 9.5. HUB TAB: AUTO QUIRKS
+-- ==============================================================================
+local unitOptionToId = {}
+local unitIdToOption = {}
+
+local function GetAvailableUnitOptions(filterCategory)
+    local options = {}
+
+    pcall(function()
+        if DataController and DataController.Inventory and EntryRegistry then
+            local inv = DataController.Inventory()
+            local slots = (DataController.Slots and DataController.Slots()) or {}
+            local slotByUnitId = {}
+            for sNum, sData in pairs(slots) do
+                if sData and sData.unitId then
+                    slotByUnitId[sData.unitId] = sNum
+                end
+            end
+
+            local filterMap = nil
+            if filterCategory == "Quirks" then
+                filterMap = GetSelectedQuirksMap(State.SelectedQuirks)
+            elseif filterCategory == "Grades" then
+                filterMap = GetSelectedGradesMap(State.SelectedGrades)
+            elseif filterCategory == "Traits" then
+                filterMap = GetSelectedTraitsMap(State.SelectedTraits)
+            end
+
+            local temp = {}
+            for id, item in pairs(inv) do
+                local cfg = EntryRegistry.getEntryConfig(item.name)
+                if cfg and cfg.kind == "Unit" then
+                    local sNum = slotByUnitId[id]
+                    local rawChance = 0
+                    if cfg.chance then
+                        pcall(function() rawChance = cfg.chance(item.attributes) end)
+                    end
+
+                    local isSatisfied = false
+                    if filterMap and next(filterMap) and item.attributes then
+                        if filterCategory == "Quirks" then
+                            local q = item.attributes.quirk
+                            if q and filterMap[q] then
+                                isSatisfied = true
+                            end
+                        elseif filterCategory == "Grades" then
+                            local g = item.attributes.grade
+                            if g and filterMap[g] then
+                                isSatisfied = true
+                            end
+                        elseif filterCategory == "Traits" then
+                            local t = item.attributes.trait
+                            if t and filterMap[t] then
+                                isSatisfied = true
+                            end
+                        end
+                    end
+
+                    table.insert(temp, {
+                        id = id,
+                        name = item.name,
+                        chance = rawChance,
+                        slotNum = tonumber(sNum) or 999,
+                        isSlot = sNum ~= nil,
+                        isSatisfied = isSatisfied
+                    })
+                end
+            end
+
+            table.sort(temp, function(a, b)
+                if a.isSlot ~= b.isSlot then
+                    return a.isSlot
+                end
+                if a.slotNum ~= b.slotNum then
+                    return a.slotNum < b.slotNum
+                end
+                if a.chance ~= b.chance then
+                    return a.chance > b.chance
+                end
+                return a.name < b.name
+            end)
+
+            local hasPendingEquipped = false
+            for _, u in ipairs(temp) do
+                if u.isSlot and not u.isSatisfied then
+                    hasPendingEquipped = true
+                    break
+                end
+            end
+            if hasPendingEquipped then
+                table.insert(options, "[All Equipped Units]")
+            end
+
+            local nameCounts = {}
+            for _, u in ipairs(temp) do
+                local prefix = u.isSlot and ("[Podium " .. tostring(u.slotNum) .. "] ") or ""
+                local formattedChance = (NumberFormatter and NumberFormatter.FormatCompact and NumberFormatter.FormatCompact(u.chance)) or tostring(u.chance)
+                local numPart, sfxPart = formattedChance:match("^([%d%.]+)(%a*)$")
+                if numPart and sfxPart and sfxPart ~= "" then
+                    formattedChance = numPart .. sfxPart:upper()
+                end
+                local chanceStr = "1 in " .. formattedChance
+                local baseLabel = prefix .. u.name .. " (" .. chanceStr .. ")"
+
+                nameCounts[baseLabel] = (nameCounts[baseLabel] or 0) + 1
+                local finalLabel = baseLabel
+                if nameCounts[baseLabel] > 1 then
+                    finalLabel = baseLabel .. " #" .. tostring(nameCounts[baseLabel])
+                end
+
+                unitOptionToId[finalLabel] = u.id
+                unitIdToOption[u.id] = finalLabel
+
+                if not u.isSatisfied then
+                    table.insert(options, finalLabel)
+                end
+            end
+        end
+    end)
+
+    return options
+end
+
+local function ResolveSelectedUnitIds(selectedUnits)
+    local targetUnitIds = {}
+    local hasAllEquipped = false
+
+    local list = {}
+    if type(selectedUnits) == "table" then
+        for k, v in pairs(selectedUnits) do
+            if type(k) == "number" then
+                table.insert(list, v)
+            elseif v == true then
+                table.insert(list, k)
+            end
+        end
+    end
+
+    local inv = (DataController and DataController.Inventory and DataController.Inventory()) or {}
+    local slots = (DataController and DataController.Slots and DataController.Slots()) or {}
+
+    for _, opt in ipairs(list) do
+        if opt == "[All Equipped Units]" then
+            hasAllEquipped = true
+        elseif unitOptionToId[opt] and inv[unitOptionToId[opt]] then
+            targetUnitIds[unitOptionToId[opt]] = true
+        else
+            -- Robust fallback: match by podium number
+            local podiumNum = opt:match("%[Podium (%d+)%]")
+            if podiumNum and slots[podiumNum] and slots[podiumNum].unitId then
+                targetUnitIds[slots[podiumNum].unitId] = true
+            else
+                -- Fallback to shortId in case config had previous format
+                local shortId = opt:match("#([a-f0-9]+)")
+                if shortId then
+                    for id, _ in pairs(inv) do
+                        if id:sub(1, #shortId) == shortId then
+                            targetUnitIds[id] = true
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if hasAllEquipped then
+        for _, s in pairs(slots) do
+            if s and s.unitId and inv[s.unitId] then
+                targetUnitIds[s.unitId] = true
+            end
+        end
+    end
+
+    return targetUnitIds
+end
+
+HubSections.Quirks:Header({ Text = "Auto Quirks" })
+
+HubSections.Quirks:Toggle({
+    Name = "Auto Quirks",
+    Default = (State.AutoQuirks == true),
+    Callback = function(v)
+        State.AutoQuirks = v
+        SaveConfigDebounced()
+    end
+}, "Toggle_AutoQuirks")
+
+local QuirkUnitsDropdown = HubSections.Quirks:Dropdown({
+    Name = "Select Unit",
+    Multi = true,
+    Required = false,
+    Options = GetAvailableUnitOptions("Quirks"),
+    Default = State.SelectedQuirkUnits or {},
+    Callback = function(selected)
+        State.SelectedQuirkUnits = selected
+        SaveConfigDebounced()
+    end
+}, "Dropdown_QuirkUnits")
 
 local QuirkTargetsDropdown = HubSections.Quirks:Dropdown({
     Name = "Select Quirk",
@@ -1956,6 +2355,13 @@ local QuirkTargetsDropdown = HubSections.Quirks:Dropdown({
     Callback = function(selected)
         State.SelectedQuirks = selected
         SaveConfigDebounced()
+        task.spawn(function()
+            if QuirkUnitsDropdown then
+                RefreshDropdownPreservingSelection(QuirkUnitsDropdown, function()
+                    return GetAvailableUnitOptions("Quirks")
+                end, State.SelectedQuirkUnits, true)
+            end
+        end)
     end
 }, "Dropdown_QuirkTargets")
 
@@ -1963,7 +2369,7 @@ HubSections.Quirks:Button({
     Name = "Refresh List",
     Callback = function()
         pcall(function()
-            RefreshDropdownPreservingSelection(QuirkUnitsDropdown, GetAvailableUnitOptions, State.SelectedQuirkUnits, true)
+            RefreshDropdownPreservingSelection(QuirkUnitsDropdown, function() return GetAvailableUnitOptions("Quirks") end, State.SelectedQuirkUnits, true)
             RefreshDropdownPreservingSelection(QuirkTargetsDropdown, GetDynamicQuirkOptions, State.SelectedQuirks, false)
         end)
     end
@@ -1986,7 +2392,7 @@ local GradeUnitsDropdown = HubSections.Grades:Dropdown({
     Name = "Select Unit",
     Multi = true,
     Required = false,
-    Options = GetAvailableUnitOptions(),
+    Options = GetAvailableUnitOptions("Grades"),
     Default = State.SelectedGradeUnits or {},
     Callback = function(selected)
         State.SelectedGradeUnits = selected
@@ -2003,6 +2409,13 @@ local GradeTargetsDropdown = HubSections.Grades:Dropdown({
     Callback = function(selected)
         State.SelectedGrades = selected
         SaveConfigDebounced()
+        task.spawn(function()
+            if GradeUnitsDropdown then
+                RefreshDropdownPreservingSelection(GradeUnitsDropdown, function()
+                    return GetAvailableUnitOptions("Grades")
+                end, State.SelectedGradeUnits, true)
+            end
+        end)
     end
 }, "Dropdown_GradeTargets")
 
@@ -2010,7 +2423,7 @@ HubSections.Grades:Button({
     Name = "Refresh List",
     Callback = function()
         pcall(function()
-            RefreshDropdownPreservingSelection(GradeUnitsDropdown, GetAvailableUnitOptions, State.SelectedGradeUnits, true)
+            RefreshDropdownPreservingSelection(GradeUnitsDropdown, function() return GetAvailableUnitOptions("Grades") end, State.SelectedGradeUnits, true)
             RefreshDropdownPreservingSelection(GradeTargetsDropdown, GetDynamicGradeOptions, State.SelectedGrades, false)
         end)
     end
@@ -2033,7 +2446,7 @@ local TraitUnitsDropdown = HubSections.Traits:Dropdown({
     Name = "Select Unit",
     Multi = true,
     Required = false,
-    Options = GetAvailableUnitOptions(),
+    Options = GetAvailableUnitOptions("Traits"),
     Default = State.SelectedTraitUnits or {},
     Callback = function(selected)
         State.SelectedTraitUnits = selected
@@ -2050,6 +2463,13 @@ local TraitTargetsDropdown = HubSections.Traits:Dropdown({
     Callback = function(selected)
         State.SelectedTraits = selected
         SaveConfigDebounced()
+        task.spawn(function()
+            if TraitUnitsDropdown then
+                RefreshDropdownPreservingSelection(TraitUnitsDropdown, function()
+                    return GetAvailableUnitOptions("Traits")
+                end, State.SelectedTraitUnits, true)
+            end
+        end)
     end
 }, "Dropdown_TraitTargets")
 
@@ -2057,7 +2477,7 @@ HubSections.Traits:Button({
     Name = "Refresh List",
     Callback = function()
         pcall(function()
-            RefreshDropdownPreservingSelection(TraitUnitsDropdown, GetAvailableUnitOptions, State.SelectedTraitUnits, true)
+            RefreshDropdownPreservingSelection(TraitUnitsDropdown, function() return GetAvailableUnitOptions("Traits") end, State.SelectedTraitUnits, true)
             RefreshDropdownPreservingSelection(TraitTargetsDropdown, GetDynamicTraitOptions, State.SelectedTraits, false)
         end)
     end
@@ -2349,6 +2769,22 @@ LoadConfig = function()
                 pcall(function() MacLib.Options["Slider_EquipBestInterval"]:UpdateValue(State.EquipBestInterval) end)
             end
         end
+        if data.AutoEquipQuirks ~= nil then
+            State.AutoEquipQuirks = (data.AutoEquipQuirks == true)
+            if MacLib.Options["Toggle_AutoEquipQuirks"] then
+                pcall(function() MacLib.Options["Toggle_AutoEquipQuirks"]:UpdateState(State.AutoEquipQuirks) end)
+            end
+        end
+        if data.SelectedEquipQuirks ~= nil and type(data.SelectedEquipQuirks) == "table" and MacLib.Options["Dropdown_EquipQuirksTargets"] then
+            State.SelectedEquipQuirks = data.SelectedEquipQuirks
+            pcall(function() MacLib.Options["Dropdown_EquipQuirksTargets"]:UpdateSelection(NormalizeSelectionList(State.SelectedEquipQuirks)) end)
+        end
+        if data.EquipQuirksInterval then
+            State.EquipQuirksInterval = tonumber(data.EquipQuirksInterval) or 15
+            if MacLib.Options["Input_EquipQuirksInterval"] then
+                pcall(function() MacLib.Options["Input_EquipQuirksInterval"]:UpdateText(tostring(State.EquipQuirksInterval)) end)
+            end
+        end
 
         -- 5. Interface Settings & Keybind
         if data.Keybind then
@@ -2634,28 +3070,44 @@ SpawnTracked(function()
     end
 end)
 
+-- Worker 3.1: Auto Equip Units Quirks Loop
+SpawnTracked(function()
+    while isScriptRunning do
+        if State.AutoEquipQuirks then
+            pcall(function()
+                EquipQuirksSorted(false)
+            end)
+        end
+        local waitSec = math.max(State.EquipQuirksInterval or 15, 3)
+        task.wait(waitSec)
+    end
+end)
+
 -- Worker 3.5: Auto Upgrade Plot Loop (Strict ascending order from Slot 1 to last slot up to PlotTargetLevel)
 SpawnTracked(function()
     while isScriptRunning do
         if State.AutoUpgradePlot and LevelUpSlotRE and DataController and DataController.Slots and DataController.Inventory then
             pcall(function()
-                local slots = DataController.Slots()
-                local inventory = DataController.Inventory()
+                local inventory = DataController.Inventory and DataController.Inventory()
+                if not inventory then return end
                 local targetLevel = tonumber(State.PlotTargetLevel) or 100
 
+                local maxSlots = (PlotConfig and PlotConfig.GetMaxSlots and PlotConfig.GetMaxSlots()) or 18
+                local rebirth = (DataController.Rebirth and DataController.Rebirth()) or 0
                 local slotNumbers = {}
-                for slotKey, _ in pairs(slots) do
-                    local num = tonumber(slotKey)
-                    if num then
-                        table.insert(slotNumbers, num)
+                for i = 1, maxSlots do
+                    local req = (PlotConfig and PlotConfig.GetSlotRebirthRequirement and PlotConfig.GetSlotRebirthRequirement(i)) or 0
+                    if req <= rebirth then
+                        table.insert(slotNumbers, i)
                     end
                 end
                 table.sort(slotNumbers)
 
                 local didUpgrade = false
                 for _, slotIdx in ipairs(slotNumbers) do
-                    local slotData = slots[tostring(slotIdx)] or slots[slotIdx]
-                    local uId = slotData and slotData.unitId
+                    local sNode = DataController.Slots[tostring(slotIdx)]
+                    local sVal = sNode and sNode()
+                    local uId = sVal and sVal.unitId
                     local uItem = uId and inventory[uId]
                     if uItem and uItem.attributes then
                         local currentLevel = uItem.attributes.level or 1
@@ -2878,6 +3330,15 @@ SpawnTracked(function()
                                 })
                             end)
                         end
+                        task.spawn(function()
+                            if QuirkUnitsDropdown then
+                                pcall(function()
+                                    RefreshDropdownPreservingSelection(QuirkUnitsDropdown, function()
+                                        return GetAvailableUnitOptions("Quirks")
+                                    end, State.SelectedQuirkUnits, true)
+                                end)
+                            end
+                        end)
                     end
                     task.wait(0.5)
                     return
@@ -2891,6 +3352,19 @@ SpawnTracked(function()
                     if currentMoney >= cost then
                         RollQuirkRE:FireServer(activeUnitId, true)
                         task.wait(QUIRK_ROLL_DELAY)
+                        local updatedInv = (DataController.Inventory and DataController.Inventory()) or inv
+                        local updatedUnit = updatedInv[activeUnitId]
+                        if updatedUnit and updatedUnit.attributes and targetQuirksMap[updatedUnit.attributes.quirk] then
+                            task.spawn(function()
+                                if QuirkUnitsDropdown then
+                                    pcall(function()
+                                        RefreshDropdownPreservingSelection(QuirkUnitsDropdown, function()
+                                            return GetAvailableUnitOptions("Quirks")
+                                        end, State.SelectedQuirkUnits, true)
+                                    end)
+                                end
+                            end)
+                        end
                     else
                         task.wait(0.5)
                     end
@@ -3010,6 +3484,15 @@ SpawnTracked(function()
                                 })
                             end)
                         end
+                        task.spawn(function()
+                            if GradeUnitsDropdown then
+                                pcall(function()
+                                    RefreshDropdownPreservingSelection(GradeUnitsDropdown, function()
+                                        return GetAvailableUnitOptions("Grades")
+                                    end, State.SelectedGradeUnits, true)
+                                end)
+                            end
+                        end)
                     end
                     task.wait(0.5)
                     return
@@ -3021,6 +3504,19 @@ SpawnTracked(function()
                 if unitItem and unitItem.attributes then
                     RollGradeRE:FireServer(activeUnitId, true)
                     task.wait(GRADE_ROLL_DELAY)
+                    local updatedInv = (DataController.Inventory and DataController.Inventory()) or inv
+                    local updatedUnit = updatedInv[activeUnitId]
+                    if updatedUnit and updatedUnit.attributes and targetGradesMap[updatedUnit.attributes.grade] then
+                        task.spawn(function()
+                            if GradeUnitsDropdown then
+                                pcall(function()
+                                    RefreshDropdownPreservingSelection(GradeUnitsDropdown, function()
+                                        return GetAvailableUnitOptions("Grades")
+                                    end, State.SelectedGradeUnits, true)
+                                end)
+                            end
+                        end)
+                    end
                 else
                     task.wait(0.1)
                 end
@@ -3140,6 +3636,15 @@ SpawnTracked(function()
                                 })
                             end)
                         end
+                        task.spawn(function()
+                            if TraitUnitsDropdown then
+                                pcall(function()
+                                    RefreshDropdownPreservingSelection(TraitUnitsDropdown, function()
+                                        return GetAvailableUnitOptions("Traits")
+                                    end, State.SelectedTraitUnits, true)
+                                end)
+                            end
+                        end)
                     end
                     task.wait(0.5)
                     return
@@ -3151,6 +3656,19 @@ SpawnTracked(function()
                 if unitItem and unitItem.attributes then
                     RollTraitRE:FireServer(activeUnitId, true)
                     task.wait(TRAIT_ROLL_DELAY)
+                    local updatedInv = (DataController.Inventory and DataController.Inventory()) or inv
+                    local updatedUnit = updatedInv[activeUnitId]
+                    if updatedUnit and updatedUnit.attributes and targetTraitsMap[updatedUnit.attributes.trait] then
+                        task.spawn(function()
+                            if TraitUnitsDropdown then
+                                pcall(function()
+                                    RefreshDropdownPreservingSelection(TraitUnitsDropdown, function()
+                                        return GetAvailableUnitOptions("Traits")
+                                    end, State.SelectedTraitUnits, true)
+                                end)
+                            end
+                        end)
+                    end
                 else
                     task.wait(0.1)
                 end
@@ -3175,6 +3693,9 @@ SpawnTracked(function()
                 if #currentQuirks ~= lastQuirkCount then
                     lastQuirkCount = #currentQuirks
                     RefreshDropdownPreservingSelection(QuirkTargetsDropdown, GetDynamicQuirkOptions, State.SelectedQuirks, false)
+                    if EquipQuirksDropdown and EquipQuirksDropdown.ClearOptions and EquipQuirksDropdown.InsertOptions then
+                        RefreshDropdownPreservingSelection(EquipQuirksDropdown, GetDynamicQuirkOptions, State.SelectedEquipQuirks, false)
+                    end
                 end
             end
 
