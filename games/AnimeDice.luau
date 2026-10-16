@@ -1775,6 +1775,68 @@ end
 
 -- Auto Equip Units Quirks Core Logic
 local isEquippingQuirks = false
+local EquipQuirksStatusLabel = nil
+local EquipQuirksSummaryLabel = nil
+
+local function UpdateQuirksLiveStatus(text)
+    if EquipQuirksStatusLabel then
+        UpdateLabel(EquipQuirksStatusLabel, text)
+    end
+end
+
+local function RefreshPlotQuirksSummary()
+    if not EquipQuirksSummaryLabel then return end
+    pcall(function()
+        if not (DataController and DataController.Slots and DataController.Inventory and PlotConfig) then
+            UpdateLabel(EquipQuirksSummaryLabel, "Plot Quirks: Unknown")
+            return
+        end
+        local inv = DataController.Inventory and DataController.Inventory()
+        if not inv then return end
+
+        local maxSlots = (PlotConfig.GetMaxSlots and PlotConfig.GetMaxSlots()) or 18
+        local rebirth = (DataController.Rebirth and DataController.Rebirth()) or 0
+        local quirkCounts = {}
+        local emptySlots = 0
+        local totalUnlocked = 0
+
+        for i = 1, maxSlots do
+            local req = (PlotConfig.GetSlotRebirthRequirement and PlotConfig.GetSlotRebirthRequirement(i)) or 0
+            if req <= rebirth then
+                totalUnlocked = totalUnlocked + 1
+                local sNode = DataController.Slots[tostring(i)]
+                local sVal = sNode and sNode()
+                local uid = sVal and sVal.unitId
+                local item = uid and inv[uid]
+                if item and item.attributes and item.attributes.quirk and item.attributes.quirk ~= "None" then
+                    local q = item.attributes.quirk
+                    quirkCounts[q] = (quirkCounts[q] or 0) + 1
+                elseif item then
+                    quirkCounts["No Quirk"] = (quirkCounts["No Quirk"] or 0) + 1
+                else
+                    emptySlots = emptySlots + 1
+                end
+            end
+        end
+
+        local parts = {}
+        for q, count in pairs(quirkCounts) do
+            table.insert(parts, string.format("%dx %s", count, q))
+        end
+        table.sort(parts)
+        if emptySlots > 0 then
+            table.insert(parts, string.format("%d Empty", emptySlots))
+        end
+
+        local summaryText = "Plot Quirks: "
+        if #parts == 0 then
+            summaryText = summaryText .. "All empty (" .. tostring(totalUnlocked) .. " slots)"
+        else
+            summaryText = summaryText .. table.concat(parts, ", ")
+        end
+        UpdateLabel(EquipQuirksSummaryLabel, summaryText)
+    end)
+end
 
 local function GetQuirksOrderMap()
     local orderMap = {}
@@ -1950,52 +2012,69 @@ local function EquipQuirksSorted(force)
     isEquippingQuirks = true
 
     pcall(function()
+        UpdateQuirksLiveStatus("Status: Planning optimal placement...")
         local targetSlotsPlan, slotNumbers = CalculateQuirksEquipPlan()
         if not targetSlotsPlan or not slotNumbers or #slotNumbers == 0 then
             isEquippingQuirks = false
+            UpdateQuirksLiveStatus("Status: Idle (No matching units found)")
+            RefreshPlotQuirksSummary()
             return
         end
 
         if not force and AreQuirksSlotsMatchingPlan(targetSlotsPlan, slotNumbers) then
             isEquippingQuirks = false
+            UpdateQuirksLiveStatus(string.format("Status: Optimal (All %d slots matched)", #slotNumbers))
+            RefreshPlotQuirksSummary()
             return
         end
 
         -- Map currently occupied slots
         local currentSlotUnits = {}
+        local currentUnitToSlot = {}
         for _, sNum in ipairs(slotNumbers) do
             local sNode = DataController.Slots[tostring(sNum)]
             local sVal = sNode and sNode()
             if sVal and sVal.unitId then
                 currentSlotUnits[sNum] = sVal.unitId
+                currentUnitToSlot[sVal.unitId] = sNum
             end
         end
 
-        -- 1. Identify slots that need to be picked up first
-        -- Slots that have a unit differing from targetSlotsPlan must be cleared
-        -- so the unit returns to inventory and cannot block placement
-        local needsPickup = {}
-        for _, sNum in ipairs(slotNumbers) do
-            local curUnit = currentSlotUnits[sNum]
-            local targetUnit = targetSlotsPlan[sNum]
-            if curUnit and curUnit ~= targetUnit then
-                table.insert(needsPickup, sNum)
+        -- SMART SWAP / SPEED BOOST:
+        -- Only evict (Pick Up) a slot if the unit inside it is required by another slot in the plan!
+        -- If a unit is from inventory, we can overwrite existing slots directly (no pickup required!).
+        local slotsToEvictMap = {}
+        for sNum, targetUnitId in pairs(targetSlotsPlan) do
+            local curSlotOfTarget = currentUnitToSlot[targetUnitId]
+            if curSlotOfTarget and curSlotOfTarget ~= sNum then
+                -- targetUnitId is currently held captive in curSlotOfTarget! Must evict it to inventory!
+                slotsToEvictMap[curSlotOfTarget] = true
             end
         end
 
-        if #needsPickup > 0 then
+        local evictList = {}
+        for s, _ in pairs(slotsToEvictMap) do
+            table.insert(evictList, s)
+        end
+        table.sort(evictList)
+
+        if #evictList > 0 then
+            UpdateQuirksLiveStatus(string.format("Status: Evicting %d trapped unit(s)...", #evictList))
             pcall(function() UnequipRF:InvokeServer() end)
             task.wait(0.55)
-            for _, sNum in ipairs(needsPickup) do
+            for _, sNum in ipairs(evictList) do
                 if not isScriptRunning then break end
                 pcall(function()
                     InteractSlotRE:FireServer(sNum)
                 end)
                 task.wait(0.55)
+                currentSlotUnits[sNum] = nil
             end
         end
 
         -- 2. Equip units into target slots from last plot down to first
+        local placedCount = 0
+        local inv = DataController.Inventory and DataController.Inventory() or {}
         for i = #slotNumbers, 1, -1 do
             if not isScriptRunning then break end
             local sNum = slotNumbers[i]
@@ -2005,20 +2084,39 @@ local function EquipQuirksSorted(force)
             local curUnit = sVal and sVal.unitId
 
             if targetUnitId and curUnit ~= targetUnitId then
+                local uItem = inv[targetUnitId]
+                local uName = uItem and uItem.name or "Unit"
+                local uQuirk = (uItem and uItem.attributes and uItem.attributes.quirk) or "Quirk"
+                UpdateQuirksLiveStatus(string.format("Status: Equipping Slot %d (%s • %s)...", sNum, uName, uQuirk))
+
+                local eqOk = false
                 pcall(function()
-                    EquipRF:InvokeServer(targetUnitId)
+                    eqOk = EquipRF:InvokeServer(targetUnitId)
                 end)
+                if not eqOk then
+                    task.wait(0.55)
+                    pcall(function() EquipRF:InvokeServer(targetUnitId) end)
+                end
                 task.wait(0.55)
                 pcall(function()
                     InteractSlotRE:FireServer(sNum)
                 end)
                 task.wait(0.55)
+                placedCount = placedCount + 1
             end
         end
 
         pcall(function()
             UnequipRF:InvokeServer()
         end)
+
+        local timeStr = os.date("%X")
+        if placedCount > 0 then
+            UpdateQuirksLiveStatus(string.format("Status: Optimal (%d updated at %s)", placedCount, timeStr))
+        else
+            UpdateQuirksLiveStatus(string.format("Status: Optimal (Checked at %s)", timeStr))
+        end
+        RefreshPlotQuirksSummary()
     end)
 
     isEquippingQuirks = false
@@ -2072,12 +2170,16 @@ PlotSections.Right:Button({
 -- 9.3 PLOT TAB: AUTO EQUIP UNITS QUIRKS SECTION
 PlotSections.QuirksEquip:Header({ Text = "Auto Equip Units Quirks" })
 
+EquipQuirksStatusLabel = PlotSections.QuirksEquip:Label({ Text = "Status: Idle" })
+EquipQuirksSummaryLabel = PlotSections.QuirksEquip:Label({ Text = "Plot Quirks: Loading..." })
+
 PlotSections.QuirksEquip:Toggle({
     Name = "Auto Equip Units Quirks",
     Default = (State.AutoEquipQuirks == true),
     Callback = function(v)
         State.AutoEquipQuirks = v
         if v then
+            UpdateQuirksLiveStatus("Status: Activating...")
             if State.AutoEquipBest then
                 State.AutoEquipBest = false
                 if MacLib.Options["Toggle_AutoEquipBest"] then
@@ -2087,6 +2189,8 @@ PlotSections.QuirksEquip:Toggle({
             task.spawn(function()
                 EquipQuirksSorted(true)
             end)
+        else
+            UpdateQuirksLiveStatus("Status: Disabled")
         end
         SaveConfigDebounced()
     end
@@ -2132,15 +2236,6 @@ PlotSections.QuirksEquip:Button({
     Callback = function()
         task.spawn(function()
             EquipQuirksSorted(true)
-        end)
-    end
-})
-
-PlotSections.QuirksEquip:Button({
-    Name = "Refresh Quirks List",
-    Callback = function()
-        pcall(function()
-            RefreshDropdownPreservingSelection(EquipQuirksDropdown, GetDynamicQuirkOptions, State.SelectedEquipQuirks, false)
         end)
     end
 })
@@ -3786,6 +3881,8 @@ SpawnTracked(function()
                         UpdateLabel(AutoSellStatusLabel, "Current Server AutoSell: 1 in " .. formattedAS)
                     end
                 end
+
+                RefreshPlotQuirksSummary()
             end
 
             if BuffController and BuffController.GetBuff then
