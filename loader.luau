@@ -17,6 +17,11 @@ local GameRegistry = {
 
     -- [Anime Dice]
     [113290951185459] = "games/AnimeDice.luau", -- Main Game
+
+    -- [Mini City Wars]
+    [133756580238784] = "games/MiniCityWars.luau", -- Main
+    [113956197828246] = "games/MiniCityWars.luau", -- Novice
+    [112820989813035] = "games/MiniCityWars.luau", -- Pro
 }
 
 local scriptPath = GameRegistry[game.PlaceId]
