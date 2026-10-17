@@ -1333,6 +1333,7 @@ local lastMatchMapId = nil
 local lastMatchStageId = nil
 local lastMatchDifficulty = nil
 local lastMatchTotalTime = nil
+local lastMatchHudTimer = nil
 local matchStartCycle = math.floor(os.time() / 1800)
 local pendingResetLeave = false
 local CheckHostLeftAndAutoLeave = nil
@@ -1352,6 +1353,7 @@ ResetMatchState = function(reason)
     lastMatchStageId = nil
     lastMatchDifficulty = nil
     lastMatchTotalTime = nil
+    lastMatchHudTimer = nil
 end
 
 local function IsMatchFinished()
@@ -1472,6 +1474,13 @@ task.spawn(function()
                 lastMatchRewards = rewards
                 lastMatchDifficulty = difficulty
                 lastMatchStats = stats
+
+                -- Capture battle timer from PlayingGui HUD as secondary backup
+                local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("PlayingGui")
+                local tt = pg and pg:FindFirstChild("Frame") and pg.Frame:FindFirstChild("HealthBar") and pg.Frame.HealthBar:FindFirstChild("TimerText")
+                if tt and tt.Text and tt.Text ~= "" then
+                    lastMatchHudTimer = string.match(tt.Text, "(%d+:%d+)")
+                end
 
                 if CheckAndSendMatchWebhook then
                     pcall(CheckAndSendMatchWebhook)
@@ -2046,17 +2055,29 @@ CheckAndSendMatchWebhook = function()
         end
 
         -- 3. Time Elapsed Resolution
-        local totalTimeLabel = frame and frame:FindFirstChild("Stats") and frame.Stats:FindFirstChild("TotalTime")
-        local totalTimeVal = totalTimeLabel and totalTimeLabel:FindFirstChild("Value")
         local timeFormatted = "00:00"
-        if totalTimeVal and totalTimeVal.Text ~= "" and totalTimeVal.Text ~= "00:00" then
-            timeFormatted = totalTimeVal.Text
-        elseif lastMatchTotalTime and tonumber(lastMatchTotalTime) then
+        if lastMatchTotalTime then
             local secs = tonumber(lastMatchTotalTime)
-            timeFormatted = string.format("%02d:%02d", math.floor(secs / 60), secs % 60)
-        else
-            local elapsedSecs = math.max(1, math.floor(os.clock() - (battleStartTime or os.clock())))
-            timeFormatted = string.format("%02d:%02d", math.floor(elapsedSecs / 60), elapsedSecs % 60)
+            if secs and secs > 0 then
+                timeFormatted = string.format("%02d:%02d", math.floor(secs / 60), math.floor(secs % 60))
+            elseif type(lastMatchTotalTime) == "string" and string.find(lastMatchTotalTime, "%d+:%d+") then
+                timeFormatted = string.match(lastMatchTotalTime, "%d+:%d+")
+            end
+        end
+
+        if timeFormatted == "00:00" and lastMatchHudTimer and lastMatchHudTimer ~= "" and lastMatchHudTimer ~= "00:00" then
+            timeFormatted = lastMatchHudTimer
+        end
+
+        if timeFormatted == "00:00" then
+            local totalTimeLabel = frame and frame:FindFirstChild("Stats") and frame.Stats:FindFirstChild("TotalTime")
+            local totalTimeVal = totalTimeLabel and totalTimeLabel:FindFirstChild("Value")
+            if totalTimeVal and totalTimeVal.Text ~= "" and totalTimeVal.Text ~= "00:00" then
+                timeFormatted = totalTimeVal.Text
+            else
+                local elapsedSecs = math.max(1, math.floor(os.clock() - (battleStartTime or os.clock())))
+                timeFormatted = string.format("%02d:%02d", math.floor(elapsedSecs / 60), math.floor(elapsedSecs % 60))
+            end
         end
 
         -- 4. Stats Resolution (Damage, Mobs, EXP)
@@ -2064,32 +2085,40 @@ CheckAndSendMatchWebhook = function()
         local mobsStr = "N/A"
         local expStr = "N/A"
 
+        -- Primary: Authoritative server stats (Instant & immune to GUI count-up animations)
+        if lastMatchStats and type(lastMatchStats) == "table" then
+            if lastMatchStats.TotalDmg and tostring(lastMatchStats.TotalDmg) ~= "0" then
+                damageStr = tostring(lastMatchStats.TotalDmg)
+            end
+            if lastMatchStats.Takedowns and tostring(lastMatchStats.Takedowns) ~= "0" then
+                mobsStr = tostring(lastMatchStats.Takedowns)
+            end
+            if lastMatchStats.BattlepassExp and tostring(lastMatchStats.BattlepassExp) ~= "0" then
+                expStr = "+" .. tostring(lastMatchStats.BattlepassExp) .. " BP EXP"
+            end
+        end
+
+        -- Secondary: EndGame UI fallback
         local statsFrame = frame and frame:FindFirstChild("Stats")
         if statsFrame then
-            local dmgVal = statsFrame:FindFirstChild("TotalDmg") and statsFrame.TotalDmg:FindFirstChild("Value")
-            if dmgVal and dmgVal.Text ~= "" and dmgVal.Text ~= "0" then
-                damageStr = dmgVal.Text
+            if damageStr == "N/A" or damageStr == "0" then
+                local dmgVal = statsFrame:FindFirstChild("TotalDmg") and statsFrame.TotalDmg:FindFirstChild("Value")
+                if dmgVal and dmgVal.Text ~= "" and dmgVal.Text ~= "0" then
+                    damageStr = dmgVal.Text
+                end
             end
-
-            local killsVal = statsFrame:FindFirstChild("Takedowns") and statsFrame.Takedowns:FindFirstChild("Value")
-            if killsVal and killsVal.Text ~= "" and killsVal.Text ~= "0" then
-                mobsStr = killsVal.Text
+            if mobsStr == "N/A" or mobsStr == "0" then
+                local killsVal = statsFrame:FindFirstChild("Takedowns") and statsFrame.Takedowns:FindFirstChild("Value")
+                if killsVal and killsVal.Text ~= "" and killsVal.Text ~= "0" then
+                    mobsStr = killsVal.Text
+                end
             end
-
-            local bpVal = statsFrame:FindFirstChild("Battlepass XP") and statsFrame["Battlepass XP"]:FindFirstChild("Value")
-            if bpVal and bpVal.Text ~= "" then
-                expStr = bpVal.Text .. " BP EXP"
+            if expStr == "N/A" then
+                local bpVal = statsFrame:FindFirstChild("Battlepass XP") and statsFrame["Battlepass XP"]:FindFirstChild("Value")
+                if bpVal and bpVal.Text ~= "" then
+                    expStr = bpVal.Text .. " BP EXP"
+                end
             end
-        end
-
-        if (damageStr == "N/A" or damageStr == "0") and lastMatchStats and lastMatchStats.TotalDmg then
-            damageStr = tostring(lastMatchStats.TotalDmg)
-        end
-        if (mobsStr == "N/A" or mobsStr == "0") and lastMatchStats and lastMatchStats.Takedowns then
-            mobsStr = tostring(lastMatchStats.Takedowns)
-        end
-        if (expStr == "N/A") and lastMatchStats and lastMatchStats.BattlepassExp then
-            expStr = "+" .. tostring(lastMatchStats.BattlepassExp) .. " BP EXP"
         end
 
         -- 5. Rewards Resolution
