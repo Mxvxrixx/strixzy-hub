@@ -180,6 +180,36 @@ local rawGemsShopModule = Modules and (isLobby and (Modules:WaitForChild("GemsSh
 local GemsShopModule = rawGemsShopModule and select(2, pcall(require, rawGemsShopModule)) or nil
 local SettingModule = Modules and (Modules:FindFirstChild("SettingModule") or Modules:WaitForChild("SettingModule", 5)) and select(2, pcall(require, Modules.SettingModule)) or nil
 
+--// Cache & Sync ShopConfig across Lobby & Battle Place ("ในด่าน")
+local ShopConfigCacheFile = "STRIX HUB/cache/shop_config.json"
+if isLobby and ShopConfig and ((ShopConfig.GemsShopItems and #ShopConfig.GemsShopItems > 0) or (ShopConfig.GoldShopItems and #ShopConfig.GoldShopItems > 0)) then
+    pcall(function()
+        if not isfolder("STRIX HUB/cache") then
+            makefolder("STRIX HUB/cache")
+        end
+        writefile(ShopConfigCacheFile, HttpService:JSONEncode({
+            GemsShopItems = ShopConfig.GemsShopItems or {},
+            GoldShopItems = ShopConfig.GoldShopItems or {}
+        }))
+    end)
+elseif not isLobby then
+    -- When in Battle ("ในด่าน"), load cached ShopConfig from disk so that shop item list & prices are identical to Lobby!
+    pcall(function()
+        if isfile and isfile(ShopConfigCacheFile) then
+            local cached = readfile(ShopConfigCacheFile)
+            local parsed = HttpService:JSONDecode(cached)
+            if parsed and type(parsed) == "table" then
+                if parsed.GemsShopItems and #parsed.GemsShopItems > 0 then
+                    ShopConfig.GemsShopItems = parsed.GemsShopItems
+                end
+                if parsed.GoldShopItems and #parsed.GoldShopItems > 0 then
+                    ShopConfig.GoldShopItems = parsed.GoldShopItems
+                end
+            end
+        end
+    end)
+end
+
 
 --// Load & Patch Maclib Library (Cached locally to prevent HTTP network freezes & GitHub rate limits on Auto-Execute)
 local MacLib = nil
@@ -481,6 +511,7 @@ local State = {
     
     AutoBuyGold = false,
     SelectedGoldItems = {},
+    AutoLeaveOnShopReset = true,
     
     Keybind = Enum.KeyCode.RightControl,
     UISize = { Width = 868, Height = 650 },
@@ -615,6 +646,7 @@ if isfile(earlyTarget) then
         if type(earlyData.SelectedGemsItems) == "table" then State.SelectedGemsItems = earlyData.SelectedGemsItems end
         if earlyData.AutoBuyGold ~= nil then State.AutoBuyGold = (earlyData.AutoBuyGold == true) end
         if type(earlyData.SelectedGoldItems) == "table" then State.SelectedGoldItems = earlyData.SelectedGoldItems end
+        if earlyData.AutoLeaveOnShopReset ~= nil then State.AutoLeaveOnShopReset = (earlyData.AutoLeaveOnShopReset ~= false) end
 
         -- Pre-load Gameplay / Event Automations
         if earlyData.AutoSolveFateSword ~= nil then State.AutoSolveFateSword = (earlyData.AutoSolveFateSword ~= false) end
@@ -762,6 +794,7 @@ local function SaveConfig()
         SelectedGemsItems = ResolveItemList(State.SelectedGemsItems, diskData.SelectedGemsItems),
         AutoBuyGold = ResolveBool(State.AutoBuyGold, diskData.AutoBuyGold, false),
         SelectedGoldItems = ResolveItemList(State.SelectedGoldItems, diskData.SelectedGoldItems),
+        AutoLeaveOnShopReset = ResolveBool(State.AutoLeaveOnShopReset, diskData.AutoLeaveOnShopReset, true),
         Keybind = typeof(State.Keybind) == "EnumItem" and State.Keybind.Name or (type(State.Keybind) == "string" and State.Keybind or (diskData.Keybind or "RightControl")),
         UISize = State.UISize or diskData.UISize or { Width = 868, Height = 650 },
         AcrylicBlur = ResolveBool(State.AcrylicBlur, diskData.AcrylicBlur, true),
@@ -1324,8 +1357,222 @@ end
 local hasHandledLeave = false
 local isMatchFinished = false
 local matchStartCycle = math.floor(os.time() / 1800)
+local matchStartShopCycle = math.floor(os.time() / 1800)
 local pendingResetLeave = false
+local pendingShopResetLeave = false
 local CheckHostLeftAndAutoLeave = nil
+
+-- ====================================================================
+-- DISCORD WEBHOOK SYSTEM (Victory / Defeat Match Reporter)
+-- ====================================================================
+local battleStartTime = os.clock()
+local hasSentMatchWebhook = false
+
+-- Reset webhook flag and timer on every new wave/match
+pcall(function()
+    workspace:GetAttributeChangedSignal("CurrentWave"):Connect(function()
+        local wave = workspace:GetAttribute("CurrentWave") or 0
+        if wave <= 1 then
+            hasSentMatchWebhook = false
+            battleStartTime = os.clock()
+        end
+    end)
+end)
+
+pcall(function()
+    local pg = LocalPlayer and LocalPlayer:WaitForChild("PlayerGui", 10)
+    local eg = pg and pg:WaitForChild("EndGame", 10)
+    if eg then
+        eg:GetPropertyChangedSignal("Enabled"):Connect(function()
+            if not eg.Enabled then
+                hasSentMatchWebhook = false
+                isMatchFinished = false
+            end
+        end)
+    end
+end)
+
+local function SendDiscordWebhook(embedData)
+    if not State.WebhookEnabled or not State.WebhookUrl or State.WebhookUrl == "" then return end
+
+    local httpRequest = (syn and syn.request) or (http and http.request) or http_request or request or (fluxus and fluxus.request)
+    if not httpRequest then
+        warn("[STRIX HUB] Webhook Error: Executor HTTP request function not supported!")
+        return
+    end
+
+    local payload = {
+        username = "STRIX HUB • Anime Mysterious",
+        avatar_url = "https://raw.githubusercontent.com/STRIX-HUB/assets/main/logo.png",
+        embeds = { embedData }
+    }
+    if State.WebhookUserId and State.WebhookUserId ~= "" then
+        payload.content = "<@" .. tostring(State.WebhookUserId) .. ">"
+    end
+
+    task.spawn(function()
+        local ok, res = pcall(function()
+            return httpRequest({
+                Url = State.WebhookUrl,
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = HttpService:JSONEncode(payload)
+            })
+        end)
+        if not ok then
+            warn("[STRIX HUB] Webhook dispatch failed: " .. tostring(res))
+        end
+    end)
+end
+
+local function CheckAndSendMatchWebhook(matchData)
+    if hasSentMatchWebhook or not State.WebhookEnabled or not State.WebhookUrl or State.WebhookUrl == "" then
+        return
+    end
+
+    local eg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("EndGame")
+    local frame = eg and eg:FindFirstChild("EndGameFrame")
+
+    if not isMatchFinished and not (eg and eg.Enabled) and not matchData then
+        return
+    end
+
+    hasSentMatchWebhook = true
+
+    task.spawn(function()
+        local isVictory = true
+        local mapInfo = GetCurrentGameMode() or "Battle Match"
+        local timeFormatted = "N/A"
+        local damageStr = "N/A"
+        local mobsStr = "N/A"
+        local expStr = "N/A"
+        local rewardsList = {}
+
+        -- 1. Ingest server parameters from EndGameEvent
+        if matchData and type(matchData) == "table" then
+            if matchData.isWon ~= nil then
+                isVictory = (matchData.isWon == true)
+            end
+            if matchData.mapId then
+                mapInfo = tostring(matchData.mapId) .. (matchData.stageId and (" - Stage " .. tostring(matchData.stageId)) or "")
+            end
+            if matchData.playTime then
+                local pSecs = tonumber(matchData.playTime) or 0
+                timeFormatted = string.format("%02d:%02d", math.floor(pSecs / 60), pSecs % 60)
+            end
+            if matchData.stats and type(matchData.stats) == "table" then
+                if matchData.stats.TotalDmg then damageStr = tostring(matchData.stats.TotalDmg) end
+                if matchData.stats.Takedowns then mobsStr = tostring(matchData.stats.Takedowns) end
+                if matchData.stats.BattlepassExp then expStr = tostring(matchData.stats.BattlepassExp) end
+            end
+            if matchData.rewards and type(matchData.rewards) == "table" then
+                if (matchData.rewards.Coins or 0) > 0 then
+                    table.insert(rewardsList, "🪙 Coins x" .. tostring(matchData.rewards.Coins))
+                end
+                if (matchData.rewards.Gems or 0) > 0 then
+                    table.insert(rewardsList, "💎 Gems x" .. tostring(matchData.rewards.Gems))
+                end
+                if matchData.rewards.Items and type(matchData.rewards.Items) == "table" then
+                    for _, itm in ipairs(matchData.rewards.Items) do
+                        local itmId = itm.Id or itm.ID or "Item"
+                        local itmCount = itm.Amount or itm.Count or 1
+                        local itmName = ResolveItemName(itmId)
+                        table.insert(rewardsList, "🎁 " .. itmName .. " x" .. tostring(itmCount))
+                    end
+                end
+                if matchData.rewards.Units and type(matchData.rewards.Units) == "table" then
+                    for _, u in ipairs(matchData.rewards.Units) do
+                        local uId = u.Id or u.UnitName or "Unit"
+                        local uCount = u.Count or 1
+                        table.insert(rewardsList, "⭐ " .. tostring(uId) .. " x" .. tostring(uCount))
+                    end
+                end
+            end
+        end
+
+        -- 2. Scrape EndGame UI (augment or complete missing values)
+        if frame then
+            local resLabel = frame:FindFirstChild("Info") and frame.Info:FindFirstChild("ResultLabel")
+            local resText = resLabel and resLabel.Text or ""
+            if resText ~= "" then
+                local uRes = string.upper(resText)
+                if uRes == "WON" or uRes == "WIN" or uRes == "VICTORY" or string.find(uRes, "WON") or string.find(uRes, "WIN") or string.find(uRes, "VICTORY") then
+                    isVictory = true
+                elseif uRes == "DEFEAT" or uRes == "LOSE" or uRes == "LOST" or string.find(uRes, "DEFEAT") or string.find(uRes, "LOSE") then
+                    isVictory = false
+                end
+            end
+
+            local mapLabel = frame.Info:FindFirstChild("MapName")
+            local stageLabel = frame.Info:FindFirstChild("StageName")
+            if mapLabel and mapLabel.Text and mapLabel.Text ~= "" then
+                mapInfo = mapLabel.Text .. (stageLabel and stageLabel.Text and stageLabel.Text ~= "" and (" - " .. stageLabel.Text) or "")
+            end
+
+            local stats = frame:FindFirstChild("Stats")
+            if stats then
+                if stats:FindFirstChild("TotalDmg") and stats.TotalDmg:FindFirstChild("Value") and damageStr == "N/A" then
+                    damageStr = stats.TotalDmg.Value.Text
+                end
+                if stats:FindFirstChild("TotalTime") and stats.TotalTime:FindFirstChild("Value") and timeFormatted == "N/A" then
+                    timeFormatted = stats.TotalTime.Value.Text
+                end
+                if stats:FindFirstChild("Takedowns") and stats.Takedowns:FindFirstChild("Value") and mobsStr == "N/A" then
+                    mobsStr = stats.Takedowns.Value.Text
+                end
+                if stats:FindFirstChild("Battlepass XP") and stats["Battlepass XP"]:FindFirstChild("Value") and expStr == "N/A" then
+                    expStr = stats["Battlepass XP"].Value.Text
+                end
+            end
+
+            local rf = frame:FindFirstChild("RewardFrame")
+            if rf and #rewardsList == 0 then
+                for _, ch in ipairs(rf:GetChildren()) do
+                    if ch:IsA("GuiObject") and ch.Name ~= "Frame" and ch.Name ~= "RewardItemTemplate" and ch.Visible ~= false then
+                        local nameLabel = ch:FindFirstChild("ItemName")
+                        local countLabel = ch:FindFirstChild("ItemCount")
+                        local name = nameLabel and nameLabel.Text or ch.Name
+                        local count = countLabel and countLabel.Text or "x1"
+                        local lName = name:lower()
+                        local icon = (lName:find("coin") and "🪙 ")
+                            or (lName:find("gem") and "💎 ")
+                            or (lName:find("shard") and "💠 ")
+                            or (lName:find("capsule") and "💊 ")
+                            or "🎁 "
+                        table.insert(rewardsList, icon .. name .. " " .. count)
+                    end
+                end
+            end
+        end
+
+        if timeFormatted == "N/A" then
+            local elapsedSecs = math.max(1, math.floor(os.clock() - (battleStartTime or os.clock())))
+            timeFormatted = string.format("%02d:%02d", math.floor(elapsedSecs / 60), elapsedSecs % 60)
+        end
+
+        if isVictory and not State.WebhookOnVictory then return end
+        if not isVictory and not State.WebhookOnDefeat then return end
+
+        local rewardsStr = #rewardsList > 0 and table.concat(rewardsList, "\n") or "None / Standard Drop"
+
+        local embed = {
+            title = isVictory and "🏆 Match Completed - VICTORY!" or "💀 Match Over - DEFEAT",
+            color = isVictory and 3066993 or 15158332,
+            fields = {
+                { name = "🗺️ Map & Stage", value = tostring(mapInfo), inline = true },
+                { name = "⏱️ Time Elapsed", value = tostring(timeFormatted), inline = true },
+                { name = "⚔️ Damage Dealt", value = tostring(damageStr), inline = true },
+                { name = "👾 Takedowns", value = tostring(mobsStr), inline = true },
+                { name = "✨ EXP Gained", value = tostring(expStr), inline = true },
+                { name = "🎁 Rewards", value = tostring(rewardsStr), inline = false }
+            },
+            footer = { text = "STRIX HUB • Anime Mysterious | Account: " .. LocalPlayer.Name },
+            timestamp = DateTime.now():ToIsoDate()
+        }
+
+        SendDiscordWebhook(embed)
+    end)
+end
 
 local function IsMatchFinished()
     if isMatchFinished then
@@ -1335,11 +1582,10 @@ local function IsMatchFinished()
 
     local eg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("EndGame")
     local frame = eg and eg:FindFirstChild("EndGameFrame")
-    -- In Gameplay, EndGameFrame.Visible is strictly false during the match. It only becomes true when the match is over!
-    if eg and eg.Enabled and frame and frame.Visible then
-        local resLabel = frame:FindFirstChild("Info") and frame.Info:FindFirstChild("ResultLabel")
-        local leaveBtn = frame:FindFirstChild("Buttons") and frame.Buttons:FindFirstChild("LeaveBtn")
-        if (resLabel and resLabel.Visible) or (leaveBtn and leaveBtn.Visible) then
+    if eg and eg.Enabled then
+        local resLabel = frame and frame:FindFirstChild("Info") and frame.Info:FindFirstChild("ResultLabel")
+        local leaveBtn = frame and frame:FindFirstChild("Buttons") and frame.Buttons:FindFirstChild("LeaveBtn")
+        if (resLabel and resLabel.Visible) or (leaveBtn and leaveBtn.Visible) or (frame and frame.Visible) then
             pcall(CheckAndSendMatchWebhook)
             return true
         end
@@ -1352,10 +1598,8 @@ local function ExecuteLeaveToLobby(reasonTitle, reasonDesc)
     if hasHandledLeave then return end
     hasHandledLeave = true
 
-    -- Notifications right before teleport are omitted to prevent render engine Tween crashes during DataModel teardown
-
     task.spawn(function()
-        task.wait(2)
+        task.wait(0.8)
 
         local eg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("EndGame")
         local frame = eg and eg:FindFirstChild("EndGameFrame")
@@ -1370,7 +1614,7 @@ local function ExecuteLeaveToLobby(reasonTitle, reasonDesc)
             pcall(function() leaveReq:FireServer() end)
         end
 
-        task.wait(4)
+        task.wait(3)
         if game.PlaceId ~= 117949143041402 and not isLobby then
             pcall(function()
                 game:GetService("TeleportService"):Teleport(117949143041402)
@@ -1384,6 +1628,9 @@ local function CheckAndExecuteAutoLeave()
         hasHandledLeave = false
         isMatchFinished = false
         pendingResetLeave = false
+        pendingShopResetLeave = false
+        matchStartShopCycle = math.floor(os.time() / 1800)
+        hasSentMatchWebhook = false
         getgenv().STRIX_IS_CHALLENGE_MATCH = false
         return
     end
@@ -1400,8 +1647,18 @@ local function CheckAndExecuteAutoLeave()
         end
     end
 
-    -- Rule 1: Auto Leave On Reset -> Regardless of what mode is playing (Story, Event, Raid, Boss, Challenge),
-    -- wait for match to finish, then leave to lobby to do the newly reset Challenges!
+    -- Check if Shop restock reset happened during this match (:00 or :30) or if AutoBuy is enabled and needs purchase
+    local isShopAutoBuyActive = (State.AutoBuyGems and #State.SelectedGemsItems > 0) or (State.AutoBuyGold and #State.SelectedGoldItems > 0)
+    if (State.AutoLeaveOnShopReset or isShopAutoBuyActive) then
+        local now = os.time()
+        local currentShopCycle = math.floor(now / 1800)
+        local d = os.date("*t", now)
+        if currentShopCycle ~= matchStartShopCycle or (d.min == 0 or d.min == 30) then
+            pendingShopResetLeave = true
+        end
+    end
+
+    -- Rule 1: Auto Leave On Challenge Reset
     if State.AutoLeaveOnChallengeReset and pendingResetLeave then
         if IsMatchFinished() then
             ExecuteLeaveToLobby("Challenge Reset", "Challenge rotation reset! Match finished, leaving to Lobby for Challenges...")
@@ -1409,10 +1666,18 @@ local function CheckAndExecuteAutoLeave()
         end
     end
 
-    -- Rule 2: Normal Auto Leave -> Strictly for Challenge match completion
+    -- Rule 2: Auto Leave On Shop Reset / Auto-Buy Pending
+    if (State.AutoLeaveOnShopReset or isShopAutoBuyActive) and pendingShopResetLeave then
+        if IsMatchFinished() then
+            ExecuteLeaveToLobby("Shop Restock", "Shop restocked / Auto-Buy pending! Match finished, leaving to Lobby for Shop...")
+            return
+        end
+    end
+
+    -- Rule 3: Normal Auto Leave -> Strictly for Challenge match completion
     if State.AutoLeaveChallenge and IsChallengeMatch() then
         if IsMatchFinished() then
-            ExecuteLeaveToLobby("Auto Leave", "Challenge finished! Leaving to Lobby in 2s...")
+            ExecuteLeaveToLobby("Auto Leave", "Challenge finished! Leaving to Lobby in 1s...")
             return
         end
     end
@@ -1428,16 +1693,29 @@ pcall(function()
     local ge = ReplicatedStorage:WaitForChild("GameEvents", 10)
     local egEvent = ge and ge:WaitForChild("EndGameEvent", 10)
     if egEvent then
-        egEvent.OnClientEvent:Connect(function()
+        egEvent.OnClientEvent:Connect(function(isWon, mapId, stageId, playTime, unitsExp, nextStage, rewards, diff, stats)
             isMatchFinished = true
-            pcall(CheckAndSendMatchWebhook)
-            if (State.AutoLeaveChallenge or State.AutoLeaveOnChallengeReset) and not hasHandledLeave then
-                task.delay(1.5, function()
+            pcall(function()
+                CheckAndSendMatchWebhook({
+                    isWon = isWon,
+                    mapId = mapId,
+                    stageId = stageId,
+                    playTime = playTime,
+                    unitsExp = unitsExp,
+                    nextStage = nextStage,
+                    rewards = rewards,
+                    diff = diff,
+                    stats = stats
+                })
+            end)
+            local isShopAutoBuyActive = (State.AutoBuyGems and #State.SelectedGemsItems > 0) or (State.AutoBuyGold and #State.SelectedGoldItems > 0)
+            if (State.AutoLeaveChallenge or State.AutoLeaveOnChallengeReset or State.AutoLeaveOnShopReset or isShopAutoBuyActive) and not hasHandledLeave then
+                task.delay(1.2, function()
                     CheckAndExecuteAutoLeave()
                 end)
             end
             if State.PartyAutoLeaveOnHostLeave and not hasHandledLeave then
-                task.delay(1.5, function()
+                task.delay(1.2, function()
                     if CheckHostLeftAndAutoLeave then
                         pcall(CheckHostLeftAndAutoLeave)
                     end
@@ -1830,155 +2108,8 @@ local function GetReplicaData()
     return nil
 end
 
--- ====================================================================
--- DISCORD WEBHOOK SYSTEM (Victory / Defeat Match Reporter)
--- ====================================================================
-local battleStartTime = os.clock()
-local hasSentMatchWebhook = false
-local lastMatchRewards = nil
+-- Webhook system is defined at lifecycle start before IsMatchFinished
 
-pcall(function()
-    local srui = Remotes and Remotes:FindFirstChild("ShowRewardsUI")
-    if srui then
-        srui.OnClientEvent:Connect(function(rewards)
-            lastMatchRewards = rewards
-        end)
-    end
-    local srui2 = Remotes and Remotes:FindFirstChild("ShowRewardUI")
-    if srui2 then
-        srui2.OnClientEvent:Connect(function(rewards)
-            lastMatchRewards = rewards
-        end)
-    end
-end)
-
-local function SendDiscordWebhook(embedData)
-    if not State.WebhookEnabled or not State.WebhookUrl or State.WebhookUrl == "" then return end
-    
-    local httpRequest = (syn and syn.request) or (http and http.request) or http_request or request or (fluxus and fluxus.request)
-    if not httpRequest then
-        warn("[STRIX HUB] Webhook Error: Executor HTTP request function not supported!")
-        return
-    end
-
-    local payload = {
-        username = "STRIX HUB • Anime Mysterious",
-        avatar_url = "https://raw.githubusercontent.com/STRIX-HUB/assets/main/logo.png",
-        embeds = { embedData }
-    }
-    if State.WebhookUserId and State.WebhookUserId ~= "" then
-        payload.content = "<@" .. tostring(State.WebhookUserId) .. ">"
-    end
-
-    task.spawn(function()
-        local ok, res = pcall(function()
-            return httpRequest({
-                Url = State.WebhookUrl,
-                Method = "POST",
-                Headers = { ["Content-Type"] = "application/json" },
-                Body = HttpService:JSONEncode(payload)
-            })
-        end)
-        if not ok then
-            warn("[STRIX HUB] Webhook dispatch failed: " .. tostring(res))
-        end
-    end)
-end
-
-local function CheckAndSendMatchWebhook()
-    if hasSentMatchWebhook or not State.WebhookEnabled or not State.WebhookUrl or State.WebhookUrl == "" then
-        return
-    end
-
-    local eg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("EndGame")
-    local frame = eg and eg:FindFirstChild("EndGameFrame")
-    if not (eg and eg.Enabled and frame and frame.Visible) and not isMatchFinished then
-        return
-    end
-
-    hasSentMatchWebhook = true
-    task.spawn(function()
-        task.wait(1.5) -- Wait for server rewards & statistics replication
-
-        local resLabel = frame and frame:FindFirstChild("Info") and frame.Info:FindFirstChild("ResultLabel")
-        local resText = resLabel and resLabel.Text or ""
-        local isVictory = string.find(string.upper(resText), "VICTORY") ~= nil or string.find(string.upper(resText), "WIN") ~= nil
-        if resText == "" then
-            isVictory = true
-        end
-
-        if isVictory and not State.WebhookOnVictory then return end
-        if not isVictory and not State.WebhookOnDefeat then return end
-
-        local mapInfo = GetCurrentGameMode() or "Battle Match"
-        local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("PlayingGui")
-        local sm = pg and pg:FindFirstChild("Frame") and pg.Frame:FindFirstChild("MainContainer")
-            and pg.Frame.MainContainer:FindFirstChild("StageText")
-            and pg.Frame.MainContainer.StageText:FindFirstChild("StageMap")
-        if sm and sm.Text and sm.Text ~= "" then
-            mapInfo = sm.Text
-        end
-
-        local elapsedSecs = math.max(1, math.floor(os.clock() - (battleStartTime or os.clock())))
-        local timeFormatted = string.format("%02d:%02d", math.floor(elapsedSecs / 60), elapsedSecs % 60)
-
-        local damageStr = "N/A"
-        local mobsStr = "N/A"
-        local expStr = "N/A"
-        local rewardsList = {}
-
-        if frame then
-            for _, desc in ipairs(frame:GetDescendants()) do
-                if desc:IsA("TextLabel") and desc.Visible and desc.Text and desc.Text ~= "" then
-                    local txt = desc.Text
-                    local ltxt = string.lower(txt)
-                    if string.find(ltxt, "damage") then
-                        damageStr = txt
-                    elseif string.find(ltxt, "kill") or string.find(ltxt, "mob") or string.find(ltxt, "enem") then
-                        mobsStr = txt
-                    elseif string.find(ltxt, "exp") then
-                        expStr = txt
-                    end
-                end
-            end
-        end
-
-        if lastMatchRewards and type(lastMatchRewards) == "table" then
-            if (lastMatchRewards.Coins or 0) > 0 then
-                table.insert(rewardsList, "🪙 " .. tostring(lastMatchRewards.Coins) .. " Coins")
-            end
-            if (lastMatchRewards.Gems or 0) > 0 then
-                table.insert(rewardsList, "💎 " .. tostring(lastMatchRewards.Gems) .. " Gems")
-            end
-            if lastMatchRewards.Items and type(lastMatchRewards.Items) == "table" then
-                for _, itm in ipairs(lastMatchRewards.Items) do
-                    local itmName = itm.Id or "Item"
-                    local itmAmount = itm.Amount or 1
-                    table.insert(rewardsList, "🎁 " .. itmName .. " x" .. tostring(itmAmount))
-                end
-            end
-        end
-
-        local rewardsStr = #rewardsList > 0 and table.concat(rewardsList, "\n") or "None / Standard Drop"
-
-        local embed = {
-            title = isVictory and "🏆 Match Completed - VICTORY!" or "💀 Match Over - DEFEAT",
-            color = isVictory and 3066993 or 15158332,
-            fields = {
-                { name = "🗺️ Map & Stage", value = tostring(mapInfo), inline = true },
-                { name = "⏱️ Time Elapsed", value = tostring(timeFormatted), inline = true },
-                { name = "⚔️ Damage Dealt", value = tostring(damageStr), inline = true },
-                { name = "👾 Mobs Killed", value = tostring(mobsStr), inline = true },
-                { name = "✨ EXP Gained", value = tostring(expStr), inline = true },
-                { name = "🎁 Rewards", value = tostring(rewardsStr), inline = false }
-            },
-            footer = { text = "STRIX HUB • Anime Mysterious | Account: " .. LocalPlayer.Name },
-            timestamp = DateTime.now():ToIsoDate()
-        }
-
-        SendDiscordWebhook(embed)
-    end)
-end
 
 -- ====================================================================
 -- AUTO OPEN CAPSULES (Storage-Safe Capsule Engine)
@@ -4638,19 +4769,40 @@ SummonShopSections.GemsShop:Header({ Text = "Gems Shop" })
 
 SummonShopSections.GemsShop:Toggle({
     Name = "Auto Buy Gems Shop",
-    Default = false,
+    Default = (State.AutoBuyGems == true),
     Callback = function(val)
         State.AutoBuyGems = val
         SaveConfigDebounced()
     end
 }, "Toggle_AutoBuyGems")
 
+SummonShopSections.GemsShop:Toggle({
+    Name = "Auto Leave on Shop Restock",
+    Default = (State.AutoLeaveOnShopReset ~= false),
+    Callback = function(val)
+        State.AutoLeaveOnShopReset = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_AutoLeaveOnShopReset")
+
+local initialGemsLabels = {}
+if type(State.SelectedGemsItems) == "table" then
+    for _, id in ipairs(State.SelectedGemsItems) do
+        local lbl = GameData.GemsIdToLabel[id]
+        if lbl then
+            table.insert(initialGemsLabels, lbl)
+        elseif GameData.GemsItemMap[id] then
+            table.insert(initialGemsLabels, id)
+        end
+    end
+end
+
 SummonShopSections.GemsShop:Dropdown({
     Name = "Select Items",
     Multi = true,
     Required = false,
     Options = GameData.GemsItems,
-    Default = {},
+    Default = initialGemsLabels,
     Callback = function(val)
         State.SelectedGemsItems = {}
         if type(val) == "table" then
@@ -4674,19 +4826,31 @@ SummonShopSections.GoldShop:Header({ Text = "Gold Shop" })
 
 SummonShopSections.GoldShop:Toggle({
     Name = "Auto Buy Gold Shop",
-    Default = false,
+    Default = (State.AutoBuyGold == true),
     Callback = function(val)
         State.AutoBuyGold = val
         SaveConfigDebounced()
     end
 }, "Toggle_AutoBuyGold")
 
+local initialGoldLabels = {}
+if type(State.SelectedGoldItems) == "table" then
+    for _, id in ipairs(State.SelectedGoldItems) do
+        local lbl = GameData.GoldIdToLabel[id]
+        if lbl then
+            table.insert(initialGoldLabels, lbl)
+        elseif GameData.GoldItemMap[id] then
+            table.insert(initialGoldLabels, id)
+        end
+    end
+end
+
 SummonShopSections.GoldShop:Dropdown({
     Name = "Select Items",
     Multi = true,
     Required = false,
     Options = GameData.GoldItems,
-    Default = {},
+    Default = initialGoldLabels,
     Callback = function(val)
         State.SelectedGoldItems = {}
         if type(val) == "table" then
@@ -5361,6 +5525,11 @@ task.spawn(function()
                 CheckChallengeResetLeave()
             end
 
+            local isShopAutoBuyActive = (State.AutoBuyGems and #State.SelectedGemsItems > 0) or (State.AutoBuyGold and #State.SelectedGoldItems > 0)
+            if State.AutoLeaveOnShopReset or isShopAutoBuyActive then
+                CheckAndExecuteAutoLeave()
+            end
+
             if State.PartyAutoLeaveOnHostLeave and CheckHostLeftAndAutoLeave then
                 pcall(CheckHostLeftAndAutoLeave)
             end
@@ -5532,6 +5701,9 @@ LoadConfig = function()
                 end
             end
             pcall(function() MacLib.Options["Dropdown_GoldItems"]:UpdateSelection(labelsToSelect) end)
+        end
+        if data.AutoLeaveOnShopReset ~= nil and MacLib.Options["Toggle_AutoLeaveOnShopReset"] then
+            pcall(function() MacLib.Options["Toggle_AutoLeaveOnShopReset"]:UpdateState(data.AutoLeaveOnShopReset) end)
         end
         if data.AutoSummon ~= nil and MacLib.Options["Toggle_AutoSummon"] then
             pcall(function() MacLib.Options["Toggle_AutoSummon"]:UpdateState(data.AutoSummon) end)
