@@ -1512,7 +1512,13 @@ local function CheckAndSendMatchWebhook(matchData)
             local stats = frame:FindFirstChild("Stats")
             if stats then
                 if stats:FindFirstChild("TotalDmg") and stats.TotalDmg:FindFirstChild("Value") and damageStr == "N/A" then
-                    damageStr = stats.TotalDmg.Value.Text
+                    local rawDmg = stats.TotalDmg.Value.Text
+                    local numDmg = tonumber(rawDmg)
+                    if numDmg then
+                        damageStr = tostring(numDmg):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+                    else
+                        damageStr = rawDmg
+                    end
                 end
                 if stats:FindFirstChild("TotalTime") and stats.TotalTime:FindFirstChild("Value") and timeFormatted == "N/A" then
                     timeFormatted = stats.TotalTime.Value.Text
@@ -1521,7 +1527,19 @@ local function CheckAndSendMatchWebhook(matchData)
                     mobsStr = stats.Takedowns.Value.Text
                 end
                 if stats:FindFirstChild("Battlepass XP") and stats["Battlepass XP"]:FindFirstChild("Value") and expStr == "N/A" then
-                    expStr = stats["Battlepass XP"].Value.Text
+                    local bpVal = stats["Battlepass XP"].Value.Text
+                    local pExp = frame:FindFirstChild("ExpScrolling") and frame.ExpScrolling:FindFirstChild("Template") and frame.ExpScrolling.Template:FindFirstChild("Inner") and frame.ExpScrolling.Template.Inner:FindFirstChild("GetExpText")
+                    if pExp and pExp.Text and pExp.Text ~= "" then
+                        expStr = pExp.Text .. " (BP " .. bpVal .. ")"
+                    else
+                        expStr = bpVal .. " BP XP"
+                    end
+                end
+            end
+            if expStr == "N/A" and frame:FindFirstChild("ExpScrolling") then
+                local pExp = frame.ExpScrolling:FindFirstChild("Template") and frame.ExpScrolling.Template:FindFirstChild("Inner") and frame.ExpScrolling.Template.Inner:FindFirstChild("GetExpText")
+                if pExp and pExp.Text and pExp.Text ~= "" then
+                    expStr = pExp.Text
                 end
             end
 
