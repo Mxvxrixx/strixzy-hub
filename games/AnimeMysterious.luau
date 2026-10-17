@@ -1455,71 +1455,67 @@ local function CheckChallengeResetLeave()
     CheckAndExecuteAutoLeave()
 end
 
--- Listen for EndGameEvent from server
-pcall(function()
-    local ge = ReplicatedStorage:WaitForChild("GameEvents", 10)
-    local egEvent = ge and ge:WaitForChild("EndGameEvent", 10)
-    if egEvent then
-        egEvent.OnClientEvent:Connect(function(isWon, mapId, stageId, totalTime, a5, a6, rewards, difficulty, stats)
-            isMatchFinished = true
-            lastMatchIsWon = isWon
-            lastMatchMapId = mapId
-            lastMatchStageId = stageId
-            lastMatchTotalTime = totalTime
-            lastMatchRewards = rewards
-            lastMatchDifficulty = difficulty
-            lastMatchStats = stats
+-- Listen for EndGameEvent and Match Lifecycle (Fully Asynchronous to guarantee instant script execution)
+task.spawn(function()
+    if isLobby then return end
 
-            if CheckAndSendMatchWebhook then
-                pcall(CheckAndSendMatchWebhook)
-            end
-            if (State.AutoLeaveChallenge or State.AutoLeaveOnChallengeReset) and not hasHandledLeave then
-                task.delay(1.5, function()
-                    CheckAndExecuteAutoLeave()
-                end)
-            end
-            if State.PartyAutoLeaveOnHostLeave and not hasHandledLeave then
-                task.delay(1.5, function()
-                    if CheckHostLeftAndAutoLeave then
-                        pcall(CheckHostLeftAndAutoLeave)
-                    end
-                end)
-            end
-        end)
+    local ge = ReplicatedStorage:FindFirstChild("GameEvents") or ReplicatedStorage:WaitForChild("GameEvents", 2)
+    if ge then
+        local egEvent = ge:FindFirstChild("EndGameEvent") or ge:WaitForChild("EndGameEvent", 2)
+        if egEvent then
+            egEvent.OnClientEvent:Connect(function(isWon, mapId, stageId, totalTime, a5, a6, rewards, difficulty, stats)
+                isMatchFinished = true
+                lastMatchIsWon = isWon
+                lastMatchMapId = mapId
+                lastMatchStageId = stageId
+                lastMatchTotalTime = totalTime
+                lastMatchRewards = rewards
+                lastMatchDifficulty = difficulty
+                lastMatchStats = stats
+
+                if CheckAndSendMatchWebhook then
+                    pcall(CheckAndSendMatchWebhook)
+                end
+                if (State.AutoLeaveChallenge or State.AutoLeaveOnChallengeReset) and not hasHandledLeave then
+                    task.delay(1.5, function()
+                        CheckAndExecuteAutoLeave()
+                    end)
+                end
+                if State.PartyAutoLeaveOnHostLeave and not hasHandledLeave then
+                    task.delay(1.5, function()
+                        if CheckHostLeftAndAutoLeave then
+                            pcall(CheckHostLeftAndAutoLeave)
+                        end
+                    end)
+                end
+            end)
+        end
+
+        local mlEvent = ge:FindFirstChild("MapLoadedComplete") or ge:WaitForChild("MapLoadedComplete", 2)
+        if mlEvent then
+            mlEvent.OnClientEvent:Connect(function()
+                if ResetMatchState then
+                    ResetMatchState("MapLoadedComplete")
+                end
+            end)
+        end
     end
-end)
 
--- Listen for MapLoadedComplete (New game / Retry / Next stage)
-pcall(function()
-    local ge = ReplicatedStorage:WaitForChild("GameEvents", 10)
-    local mlEvent = ge and ge:WaitForChild("MapLoadedComplete", 10)
-    if mlEvent then
-        mlEvent.OnClientEvent:Connect(function()
-            if ResetMatchState then
-                ResetMatchState("MapLoadedComplete")
-            end
-        end)
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes") or ReplicatedStorage:WaitForChild("Remotes", 2)
+    if remotes then
+        local closeEg = remotes:FindFirstChild("CloseEndGameUIEvent") or remotes:WaitForChild("CloseEndGameUIEvent", 2)
+        if closeEg then
+            closeEg.OnClientEvent:Connect(function()
+                if ResetMatchState then
+                    ResetMatchState("CloseEndGameUIEvent")
+                end
+            end)
+        end
     end
-end)
 
--- Listen for CloseEndGameUIEvent (EndGame screen closed upon Retry / Next / Lobby)
-pcall(function()
-    local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
-    local closeEg = remotes and remotes:WaitForChild("CloseEndGameUIEvent", 10)
-    if closeEg then
-        closeEg.OnClientEvent:Connect(function()
-            if ResetMatchState then
-                ResetMatchState("CloseEndGameUIEvent")
-            end
-        end)
-    end
-end)
-
--- Listen for EndGameFrame visibility change
-pcall(function()
-    local plGui = LocalPlayer and LocalPlayer:WaitForChild("PlayerGui", 10)
-    local eg = plGui and plGui:WaitForChild("EndGame", 10)
-    local frame = eg and eg:WaitForChild("EndGameFrame", 10)
+    local plGui = LocalPlayer and (LocalPlayer:FindFirstChild("PlayerGui") or LocalPlayer:WaitForChild("PlayerGui", 2))
+    local eg = plGui and (plGui:FindFirstChild("EndGame") or plGui:WaitForChild("EndGame", 2))
+    local frame = eg and (eg:FindFirstChild("EndGameFrame") or eg:WaitForChild("EndGameFrame", 2))
     if frame then
         frame:GetPropertyChangedSignal("Visible"):Connect(function()
             if not frame.Visible and (isMatchFinished or hasSentMatchWebhook) then
@@ -1967,20 +1963,24 @@ CheckAndSendMatchWebhook = function()
     lastWebhookDispatchTime = os.clock()
 
     task.spawn(function()
-        -- Wait dynamically for EndGameFrame to show and stats to finish tweening (intro takes ~2.5s)
-        local waitStart = os.clock()
-        while (os.clock() - waitStart) < 3.5 do
-            local currentEg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("EndGame")
-            local currentFrame = currentEg and currentEg:FindFirstChild("EndGameFrame")
-            if currentFrame and currentFrame.Visible then
-                local statsFrame = currentFrame:FindFirstChild("Stats")
-                local dmgVal = statsFrame and statsFrame:FindFirstChild("TotalDmg") and statsFrame.TotalDmg:FindFirstChild("Value")
-                if dmgVal and dmgVal.Text ~= "" and dmgVal.Text ~= "0" then
-                    task.wait(0.5) -- Allow stat animations and rewards to finish spawning
-                    break
+        -- Dynamic wait: If server already delivered full stats & rewards, dispatch quickly (0.5s)
+        if lastMatchStats and lastMatchRewards then
+            task.wait(0.5)
+        else
+            local waitStart = os.clock()
+            while (os.clock() - waitStart) < 2.0 do
+                local currentEg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("EndGame")
+                local currentFrame = currentEg and currentEg:FindFirstChild("EndGameFrame")
+                if currentFrame and currentFrame.Visible then
+                    local statsFrame = currentFrame:FindFirstChild("Stats")
+                    local dmgVal = statsFrame and statsFrame:FindFirstChild("TotalDmg") and statsFrame.TotalDmg:FindFirstChild("Value")
+                    if dmgVal and dmgVal.Text ~= "" and dmgVal.Text ~= "0" then
+                        task.wait(0.2)
+                        break
+                    end
                 end
+                task.wait(0.1)
             end
-            task.wait(0.2)
         end
 
         local currentEg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("EndGame")
