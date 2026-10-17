@@ -108,7 +108,6 @@ local RunService = game:GetService("RunService")
 --// Place Identification
 local LOBBY_PLACE_ID = 117949143041402
 local LOBBY_ALT_PLACE_ID = 110388679506690
-local GAMEPLAY_PLACE_ID = 107610426295102
 local isLobby = (game.PlaceId == LOBBY_PLACE_ID or game.PlaceId == LOBBY_ALT_PLACE_ID)
 local isBattlePlace = not isLobby
 
@@ -236,6 +235,11 @@ rawMaclibSource = rawMaclibSource:gsub(patDefault, replDefault)
 local patUpdateSel = "function DropdownFunctions:UpdateSelection%(newSelection%)"
 local replUpdateSel = "function DropdownFunctions:UpdateSelection(newSelection)\n\t\t\t\t\t\tif type(newSelection) == 'string' then newSelection = { newSelection } end"
 rawMaclibSource = rawMaclibSource:gsub(patUpdateSel, replUpdateSel)
+
+-- Patch 2.8: Slider Min/Max Arithmetic Nil Bug
+local patSliderMinMax = "function SectionFunctions:Slider%(Settings, Flag%)"
+local replSliderMinMax = "function SectionFunctions:Slider(Settings, Flag)\n\t\t\t\t\tSettings.Minimum = Settings.Minimum or Settings.Min or 0\n\t\t\t\t\tSettings.Maximum = Settings.Maximum or Settings.Max or 100"
+rawMaclibSource = rawMaclibSource:gsub(patSliderMinMax, replSliderMinMax)
 
 -- Patch 3: Responsive Content sizing (prevent double-scale gap between sidebar and content)
 rawMaclibSource = rawMaclibSource:gsub(
@@ -495,17 +499,46 @@ local State = {
     AutoDefendMoneyUnits = true,
 
     -- Event Automation
-    AutoSolveFateSword = true
+    AutoSolveFateSword = true,
+
+    -- Discord Webhook
+    WebhookEnabled = false,
+    WebhookUrl = "",
+    WebhookUserId = "",
+    WebhookOnVictory = true,
+    WebhookOnDefeat = true,
+
+    -- Auto Open Capsules
+    AutoOpenCapsules = false,
+    CapsuleMinFreeSlots = 2,
+
+    -- Auto Feed & Evolve
+    AutoFeed = false,
+    AutoFeedTarget = "Equipped", -- "Equipped", "All", or UUID
+    AutoEvolve = false,
+
+    -- Auto Trait Reroll
+    AutoTraitReroll = false,
+    TraitRerollTargetUnit = "",
+    TargetTraits = { "Absolute Ego", "Twin Stars", "Aura Burst" },
+    RespectInGameStopList = true,
+    TraitRerollDelay = 0.02,
+
+    -- Party System
+    PartyEnabled = false,
+    PartyRole = "Host", -- "Host" or "Alt"
+    PartyHost = "",
+    PartyAlts = {},
+    PartyAltsWhitelist = "",
+    PartyAutoInvite = true,
+    PartyAutoFollow = true,
+    PartyAutoJoin = true,
+    PartyAutoLeaveOnHostLeave = true
 }
 
 --// Config Paths (Save at workspace\STRIX HUB\<MapName>\<Username>.json)
 local ConfigFolder = "STRIX HUB/Anime Mysterious"
 local ConfigFile = ConfigFolder .. "/" .. tostring(LocalPlayer.Name) .. ".json"
-
-local function EnsureFolders()
-    if not isfolder("STRIX HUB") then pcall(makefolder, "STRIX HUB") end
-    if not isfolder("STRIX HUB/Anime Mysterious") then pcall(makefolder, "STRIX HUB/Anime Mysterious") end
-end
 
 local function ResolveBind(bindName)
     if not bindName or bindName == "Unknown" or bindName == "None" then return nil end
@@ -586,6 +619,55 @@ if isfile(earlyTarget) then
         -- Pre-load Gameplay / Event Automations
         if earlyData.AutoSolveFateSword ~= nil then State.AutoSolveFateSword = (earlyData.AutoSolveFateSword ~= false) end
         if earlyData.AutoDefendMoneyUnits ~= nil then State.AutoDefendMoneyUnits = (earlyData.AutoDefendMoneyUnits ~= false) end
+
+        -- Pre-load Webhook
+        if earlyData.WebhookEnabled ~= nil then State.WebhookEnabled = (earlyData.WebhookEnabled == true) end
+        if earlyData.WebhookUrl ~= nil then State.WebhookUrl = earlyData.WebhookUrl end
+        if earlyData.WebhookUserId ~= nil then State.WebhookUserId = earlyData.WebhookUserId end
+        if earlyData.WebhookOnVictory ~= nil then State.WebhookOnVictory = (earlyData.WebhookOnVictory ~= false) end
+        if earlyData.WebhookOnDefeat ~= nil then State.WebhookOnDefeat = (earlyData.WebhookOnDefeat ~= false) end
+
+        -- Pre-load Auto Open Capsules
+        if earlyData.AutoOpenCapsules ~= nil then State.AutoOpenCapsules = (earlyData.AutoOpenCapsules == true) end
+        if earlyData.CapsuleMinFreeSlots ~= nil then State.CapsuleMinFreeSlots = tonumber(earlyData.CapsuleMinFreeSlots) or 2 end
+
+        -- Pre-load Auto Feed & Evolve
+        if earlyData.AutoFeed ~= nil then State.AutoFeed = (earlyData.AutoFeed == true) end
+        if earlyData.AutoFeedTarget ~= nil then State.AutoFeedTarget = earlyData.AutoFeedTarget end
+        if earlyData.AutoEvolve ~= nil then State.AutoEvolve = (earlyData.AutoEvolve == true) end
+
+        -- Pre-load Auto Trait Reroll
+        if earlyData.AutoTraitReroll ~= nil then State.AutoTraitReroll = (earlyData.AutoTraitReroll == true) end
+        if earlyData.TraitRerollTargetUnit ~= nil then State.TraitRerollTargetUnit = earlyData.TraitRerollTargetUnit end
+        if type(earlyData.TargetTraits) == "table" then State.TargetTraits = earlyData.TargetTraits end
+        if earlyData.RespectInGameStopList ~= nil then State.RespectInGameStopList = (earlyData.RespectInGameStopList ~= false) end
+        if earlyData.TraitRerollDelay ~= nil then State.TraitRerollDelay = tonumber(earlyData.TraitRerollDelay) or 0.02 end
+
+        -- Pre-load Party System
+        if earlyData.PartyEnabled ~= nil then State.PartyEnabled = (earlyData.PartyEnabled == true) end
+        if earlyData.PartyRole ~= nil then
+            if earlyData.PartyRole == "Disabled" then
+                State.PartyEnabled = false
+                State.PartyRole = "Host"
+            else
+                State.PartyRole = (earlyData.PartyRole == "Alt") and "Alt" or "Host"
+            end
+        end
+        if earlyData.PartyHost ~= nil then State.PartyHost = earlyData.PartyHost end
+        if type(earlyData.PartyAlts) == "table" then
+            State.PartyAlts = earlyData.PartyAlts
+            State.PartyAltsWhitelist = table.concat(earlyData.PartyAlts, ", ")
+        elseif earlyData.PartyAltsWhitelist ~= nil and type(earlyData.PartyAltsWhitelist) == "string" then
+            State.PartyAltsWhitelist = earlyData.PartyAltsWhitelist
+            State.PartyAlts = {}
+            for name in string.gmatch(earlyData.PartyAltsWhitelist, "[^,;%s]+") do
+                table.insert(State.PartyAlts, name)
+            end
+        end
+        if earlyData.PartyAutoInvite ~= nil then State.PartyAutoInvite = (earlyData.PartyAutoInvite ~= false) end
+        if earlyData.PartyAutoFollow ~= nil then State.PartyAutoFollow = (earlyData.PartyAutoFollow ~= false) end
+        if earlyData.PartyAutoJoin ~= nil then State.PartyAutoJoin = (earlyData.PartyAutoJoin ~= false) end
+        if earlyData.PartyAutoLeaveOnHostLeave ~= nil then State.PartyAutoLeaveOnHostLeave = (earlyData.PartyAutoLeaveOnHostLeave ~= false) end
     end
 end
 
@@ -693,7 +775,41 @@ local function SaveConfig()
         AutoMaxGameSpeed = ResolveBool(State.AutoMaxGameSpeed, diskData.AutoMaxGameSpeed, true),
         AutoUltimate = ResolveBool(State.AutoUltimate, diskData.AutoUltimate, true),
         AutoSolveFateSword = ResolveBool(State.AutoSolveFateSword, diskData.AutoSolveFateSword, true),
-        AutoDefendMoneyUnits = ResolveBool(State.AutoDefendMoneyUnits, diskData.AutoDefendMoneyUnits, true)
+        AutoDefendMoneyUnits = ResolveBool(State.AutoDefendMoneyUnits, diskData.AutoDefendMoneyUnits, true),
+
+        -- Webhook
+        WebhookEnabled = ResolveBool(State.WebhookEnabled, diskData.WebhookEnabled, false),
+        WebhookUrl = ResolveString(State.WebhookUrl, diskData.WebhookUrl, ""),
+        WebhookUserId = ResolveString(State.WebhookUserId, diskData.WebhookUserId, ""),
+        WebhookOnVictory = ResolveBool(State.WebhookOnVictory, diskData.WebhookOnVictory, true),
+        WebhookOnDefeat = ResolveBool(State.WebhookOnDefeat, diskData.WebhookOnDefeat, true),
+
+        -- Auto Open Capsules
+        AutoOpenCapsules = ResolveBool(State.AutoOpenCapsules, diskData.AutoOpenCapsules, false),
+        CapsuleMinFreeSlots = tonumber(State.CapsuleMinFreeSlots) or tonumber(diskData.CapsuleMinFreeSlots) or 2,
+
+        -- Auto Feed & Evolve
+        AutoFeed = ResolveBool(State.AutoFeed, diskData.AutoFeed, false),
+        AutoFeedTarget = ResolveString(State.AutoFeedTarget, diskData.AutoFeedTarget, "Equipped"),
+        AutoEvolve = ResolveBool(State.AutoEvolve, diskData.AutoEvolve, false),
+
+        -- Auto Trait Reroll
+        AutoTraitReroll = ResolveBool(State.AutoTraitReroll, diskData.AutoTraitReroll, false),
+        TraitRerollTargetUnit = ResolveString(State.TraitRerollTargetUnit, diskData.TraitRerollTargetUnit, ""),
+        TargetTraits = (type(State.TargetTraits) == "table") and State.TargetTraits or (type(diskData.TargetTraits) == "table" and diskData.TargetTraits or { "Absolute Ego", "Twin Stars", "Aura Burst" }),
+        RespectInGameStopList = ResolveBool(State.RespectInGameStopList, diskData.RespectInGameStopList, true),
+        TraitRerollDelay = tonumber(State.TraitRerollDelay) or 0.02,
+
+        -- Party System
+        PartyEnabled = ResolveBool(State.PartyEnabled, diskData.PartyEnabled, false),
+        PartyRole = (State.PartyRole == "Alt") and "Alt" or "Host",
+        PartyHost = ResolveString(State.PartyHost, diskData.PartyHost, ""),
+        PartyAlts = (type(State.PartyAlts) == "table") and State.PartyAlts or {},
+        PartyAltsWhitelist = ResolveString(State.PartyAltsWhitelist, diskData.PartyAltsWhitelist, ""),
+        PartyAutoInvite = ResolveBool(State.PartyAutoInvite, diskData.PartyAutoInvite, true),
+        PartyAutoFollow = ResolveBool(State.PartyAutoFollow, diskData.PartyAutoFollow, true),
+        PartyAutoJoin = ResolveBool(State.PartyAutoJoin, diskData.PartyAutoJoin, true),
+        PartyAutoLeaveOnHostLeave = ResolveBool(State.PartyAutoLeaveOnHostLeave, diskData.PartyAutoLeaveOnHostLeave, true)
     }
 
     local okEnc, encoded = pcall(function() return HttpService:JSONEncode(payload) end)
@@ -1209,9 +1325,11 @@ local hasHandledLeave = false
 local isMatchFinished = false
 local matchStartCycle = math.floor(os.time() / 1800)
 local pendingResetLeave = false
+local CheckHostLeftAndAutoLeave = nil
 
 local function IsMatchFinished()
     if isMatchFinished then
+        pcall(CheckAndSendMatchWebhook)
         return true
     end
 
@@ -1222,6 +1340,7 @@ local function IsMatchFinished()
         local resLabel = frame:FindFirstChild("Info") and frame.Info:FindFirstChild("ResultLabel")
         local leaveBtn = frame:FindFirstChild("Buttons") and frame.Buttons:FindFirstChild("LeaveBtn")
         if (resLabel and resLabel.Visible) or (leaveBtn and leaveBtn.Visible) then
+            pcall(CheckAndSendMatchWebhook)
             return true
         end
     end
@@ -1311,9 +1430,17 @@ pcall(function()
     if egEvent then
         egEvent.OnClientEvent:Connect(function()
             isMatchFinished = true
+            pcall(CheckAndSendMatchWebhook)
             if (State.AutoLeaveChallenge or State.AutoLeaveOnChallengeReset) and not hasHandledLeave then
                 task.delay(1.5, function()
                     CheckAndExecuteAutoLeave()
+                end)
+            end
+            if State.PartyAutoLeaveOnHostLeave and not hasHandledLeave then
+                task.delay(1.5, function()
+                    if CheckHostLeftAndAutoLeave then
+                        pcall(CheckHostLeftAndAutoLeave)
+                    end
                 end)
             end
         end)
@@ -1703,6 +1830,818 @@ local function GetReplicaData()
     return nil
 end
 
+-- ====================================================================
+-- DISCORD WEBHOOK SYSTEM (Victory / Defeat Match Reporter)
+-- ====================================================================
+local battleStartTime = os.clock()
+local hasSentMatchWebhook = false
+local lastMatchRewards = nil
+
+pcall(function()
+    local srui = Remotes and Remotes:FindFirstChild("ShowRewardsUI")
+    if srui then
+        srui.OnClientEvent:Connect(function(rewards)
+            lastMatchRewards = rewards
+        end)
+    end
+    local srui2 = Remotes and Remotes:FindFirstChild("ShowRewardUI")
+    if srui2 then
+        srui2.OnClientEvent:Connect(function(rewards)
+            lastMatchRewards = rewards
+        end)
+    end
+end)
+
+local function SendDiscordWebhook(embedData)
+    if not State.WebhookEnabled or not State.WebhookUrl or State.WebhookUrl == "" then return end
+    
+    local httpRequest = (syn and syn.request) or (http and http.request) or http_request or request or (fluxus and fluxus.request)
+    if not httpRequest then
+        warn("[STRIX HUB] Webhook Error: Executor HTTP request function not supported!")
+        return
+    end
+
+    local payload = {
+        username = "STRIX HUB • Anime Mysterious",
+        avatar_url = "https://raw.githubusercontent.com/STRIX-HUB/assets/main/logo.png",
+        embeds = { embedData }
+    }
+    if State.WebhookUserId and State.WebhookUserId ~= "" then
+        payload.content = "<@" .. tostring(State.WebhookUserId) .. ">"
+    end
+
+    task.spawn(function()
+        local ok, res = pcall(function()
+            return httpRequest({
+                Url = State.WebhookUrl,
+                Method = "POST",
+                Headers = { ["Content-Type"] = "application/json" },
+                Body = HttpService:JSONEncode(payload)
+            })
+        end)
+        if not ok then
+            warn("[STRIX HUB] Webhook dispatch failed: " .. tostring(res))
+        end
+    end)
+end
+
+local function CheckAndSendMatchWebhook()
+    if hasSentMatchWebhook or not State.WebhookEnabled or not State.WebhookUrl or State.WebhookUrl == "" then
+        return
+    end
+
+    local eg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("EndGame")
+    local frame = eg and eg:FindFirstChild("EndGameFrame")
+    if not (eg and eg.Enabled and frame and frame.Visible) and not isMatchFinished then
+        return
+    end
+
+    hasSentMatchWebhook = true
+    task.spawn(function()
+        task.wait(1.5) -- Wait for server rewards & statistics replication
+
+        local resLabel = frame and frame:FindFirstChild("Info") and frame.Info:FindFirstChild("ResultLabel")
+        local resText = resLabel and resLabel.Text or ""
+        local isVictory = string.find(string.upper(resText), "VICTORY") ~= nil or string.find(string.upper(resText), "WIN") ~= nil
+        if resText == "" then
+            isVictory = true
+        end
+
+        if isVictory and not State.WebhookOnVictory then return end
+        if not isVictory and not State.WebhookOnDefeat then return end
+
+        local mapInfo = GetCurrentGameMode() or "Battle Match"
+        local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("PlayingGui")
+        local sm = pg and pg:FindFirstChild("Frame") and pg.Frame:FindFirstChild("MainContainer")
+            and pg.Frame.MainContainer:FindFirstChild("StageText")
+            and pg.Frame.MainContainer.StageText:FindFirstChild("StageMap")
+        if sm and sm.Text and sm.Text ~= "" then
+            mapInfo = sm.Text
+        end
+
+        local elapsedSecs = math.max(1, math.floor(os.clock() - (battleStartTime or os.clock())))
+        local timeFormatted = string.format("%02d:%02d", math.floor(elapsedSecs / 60), elapsedSecs % 60)
+
+        local damageStr = "N/A"
+        local mobsStr = "N/A"
+        local expStr = "N/A"
+        local rewardsList = {}
+
+        if frame then
+            for _, desc in ipairs(frame:GetDescendants()) do
+                if desc:IsA("TextLabel") and desc.Visible and desc.Text and desc.Text ~= "" then
+                    local txt = desc.Text
+                    local ltxt = string.lower(txt)
+                    if string.find(ltxt, "damage") then
+                        damageStr = txt
+                    elseif string.find(ltxt, "kill") or string.find(ltxt, "mob") or string.find(ltxt, "enem") then
+                        mobsStr = txt
+                    elseif string.find(ltxt, "exp") then
+                        expStr = txt
+                    end
+                end
+            end
+        end
+
+        if lastMatchRewards and type(lastMatchRewards) == "table" then
+            if (lastMatchRewards.Coins or 0) > 0 then
+                table.insert(rewardsList, "🪙 " .. tostring(lastMatchRewards.Coins) .. " Coins")
+            end
+            if (lastMatchRewards.Gems or 0) > 0 then
+                table.insert(rewardsList, "💎 " .. tostring(lastMatchRewards.Gems) .. " Gems")
+            end
+            if lastMatchRewards.Items and type(lastMatchRewards.Items) == "table" then
+                for _, itm in ipairs(lastMatchRewards.Items) do
+                    local itmName = itm.Id or "Item"
+                    local itmAmount = itm.Amount or 1
+                    table.insert(rewardsList, "🎁 " .. itmName .. " x" .. tostring(itmAmount))
+                end
+            end
+        end
+
+        local rewardsStr = #rewardsList > 0 and table.concat(rewardsList, "\n") or "None / Standard Drop"
+
+        local embed = {
+            title = isVictory and "🏆 Match Completed - VICTORY!" or "💀 Match Over - DEFEAT",
+            color = isVictory and 3066993 or 15158332,
+            fields = {
+                { name = "🗺️ Map & Stage", value = tostring(mapInfo), inline = true },
+                { name = "⏱️ Time Elapsed", value = tostring(timeFormatted), inline = true },
+                { name = "⚔️ Damage Dealt", value = tostring(damageStr), inline = true },
+                { name = "👾 Mobs Killed", value = tostring(mobsStr), inline = true },
+                { name = "✨ EXP Gained", value = tostring(expStr), inline = true },
+                { name = "🎁 Rewards", value = tostring(rewardsStr), inline = false }
+            },
+            footer = { text = "STRIX HUB • Anime Mysterious | Account: " .. LocalPlayer.Name },
+            timestamp = DateTime.now():ToIsoDate()
+        }
+
+        SendDiscordWebhook(embed)
+    end)
+end
+
+-- ====================================================================
+-- AUTO OPEN CAPSULES (Storage-Safe Capsule Engine)
+-- ====================================================================
+local function ProcessAutoOpenCapsules()
+    if not State.AutoOpenCapsules or not isLobby then return end
+    local OpenCapsuleRemote = Remotes and Remotes:FindFirstChild("OpenCapsule")
+    if not OpenCapsuleRemote then return end
+
+    local pData = GetReplicaData()
+    if not pData then return end
+
+    local maxStorage = pData.MaxStorage or 50
+    local currentUnits = 0
+    if pData.Inventory then
+        for _ in pairs(pData.Inventory) do currentUnits = currentUnits + 1 end
+    end
+
+    local safetyBuffer = State.CapsuleMinFreeSlots or 2
+    local freeSlots = maxStorage - currentUnits
+    if freeSlots <= safetyBuffer then
+        return -- Storage protected, never overflow!
+    end
+
+    -- Auto-detect ALL capsules from CapsuleData module & ItemInventory (Dynamic Auto-Update)
+    local targets = {}
+    local seen = {}
+
+    pcall(function()
+        local CapsuleDataMod = Modules and Modules:FindFirstChild("Data") and Modules.Data:FindFirstChild("CapsuleData")
+        local CapsuleData = CapsuleDataMod and select(2, pcall(require, CapsuleDataMod))
+        if CapsuleData and type(CapsuleData.Capsules) == "table" then
+            for capId in pairs(CapsuleData.Capsules) do
+                if not seen[capId] then
+                    seen[capId] = true
+                    table.insert(targets, capId)
+                end
+            end
+        end
+    end)
+
+    if pData.ItemInventory then
+        for itemId, count in pairs(pData.ItemInventory) do
+            if count > 0 and not seen[itemId] and string.find(string.lower(itemId), "capsule") then
+                seen[itemId] = true
+                table.insert(targets, itemId)
+            end
+        end
+    end
+
+    if #targets == 0 then
+        targets = { "MysteryCapsule", "HalloweenCapsule" }
+    end
+
+    for _, capId in ipairs(targets) do
+        local count = (pData.ItemInventory and pData.ItemInventory[capId]) or 0
+        if count > 0 then
+            local toOpen = math.clamp(math.min(count, freeSlots - safetyBuffer), 1, 100)
+            if toOpen > 0 then
+                pcall(function()
+                    OpenCapsuleRemote:InvokeServer(capId, toOpen)
+                end)
+                task.wait(0.5)
+                return
+            end
+        end
+    end
+end
+
+-- ====================================================================
+-- AUTO FEED SYSTEM (Food Items Only - Zero Unit Consumption Safety Guarantee)
+-- ====================================================================
+local function GetExpNeededToMax(unit, maxLvl)
+    maxLvl = maxLvl or 100
+    local curLvl = unit.Level or 1
+    if curLvl >= maxLvl then return 0 end
+    local UnitLevelData = Modules and Modules:FindFirstChild("Data") and Modules.Data:FindFirstChild("UnitLevelData")
+    if not UnitLevelData then return 0 end
+    local uld = select(2, pcall(require, UnitLevelData))
+    if not uld or not uld.BaseExp or not uld.Multiplier then return 0 end
+    local expNeeded = 0
+    for i = curLvl, maxLvl - 1 do
+        expNeeded = expNeeded + math.floor(uld.BaseExp * (math.pow(uld.Multiplier, i - 1)))
+    end
+    return math.max(0, expNeeded - (unit.Exp or 0))
+end
+
+-- Exclusively food items from ItemInventory (Namekian Fruit, Mist Fish, Daifuku, Curry, Chocolate, etc.)
+-- Character units / duplicate units are NEVER consumed or touched.
+local FOOD_ORDER = {
+    { Id = "Fruit_1", Exp = 50 },  -- Namekian Fruit
+    { Id = "Fruit_2", Exp = 100 }, -- Mist Fish
+    { Id = "Fruit_3", Exp = 200 }, -- Daifuku Food
+    { Id = "Fruit_4", Exp = 300 }, -- Desert Curry
+    { Id = "Fruit_5", Exp = 400 }, -- Feast Chocolate
+    { Id = "Fruit_8", Exp = 450 }, -- Acanthus Melon Pan
+    { Id = "Fruit_6", Exp = 1000 } -- Exclusive Food
+}
+
+local function ProcessAutoFeed()
+    if not State.AutoFeed or not isLobby then return end
+    local pData = GetReplicaData()
+    if not pData or not pData.Inventory then return end
+
+    local FeedUnitRemote = Remotes and Remotes:FindFirstChild("FeedUnit")
+    if not FeedUnitRemote then return end
+
+    for uuid, unit in pairs(pData.Inventory) do
+        local isTarget = false
+        if State.AutoFeedTarget == "All" then
+            isTarget = true
+        elseif State.AutoFeedTarget == "Equipped" then
+            if pData.EquippedSlots then
+                for _, eqUUID in pairs(pData.EquippedSlots) do
+                    if eqUUID == uuid then isTarget = true break end
+                end
+            end
+        elseif State.AutoFeedTarget == uuid or State.AutoFeedTarget == unit.UnitId then
+            isTarget = true
+        end
+
+        -- Auto Feed to max level with cheapest food
+        if isTarget and FeedUnitRemote then
+            local expNeeded = GetExpNeededToMax(unit, 100)
+            if expNeeded > 0 and pData.ItemInventory then
+                local queue = {}
+                local accumulatedExp = 0
+                for _, food in ipairs(FOOD_ORDER) do
+                    local available = pData.ItemInventory[food.Id] or 0
+                    if available > 0 and accumulatedExp < expNeeded then
+                        local neededUnits = math.ceil((expNeeded - accumulatedExp) / food.Exp)
+                        local countToAdd = math.min(available, neededUnits)
+                        if countToAdd > 0 then
+                            queue[food.Id] = countToAdd
+                            accumulatedExp = accumulatedExp + (countToAdd * food.Exp)
+                        end
+                    end
+                end
+                if next(queue) ~= nil then
+                    pcall(function() FeedUnitRemote:FireServer(uuid, queue) end)
+                    task.wait(0.3)
+                end
+            end
+        end
+    end
+end
+
+-- ====================================================================
+-- AUTO TRAIT REROLL SYSTEM (Target Traits & In-Game Stop List - Fast Engine & Protection)
+-- ====================================================================
+local isAutoRollingTraits = false
+local cachedTraitsModule = nil
+local cachedTraitsData = nil
+
+local function GetTraitsModules()
+    if not cachedTraitsModule then
+        local tmObj = Modules and Modules:FindFirstChild("TraitsModule")
+        if tmObj then
+            local ok, m = pcall(require, tmObj)
+            if ok then cachedTraitsModule = m end
+        end
+    end
+    if not cachedTraitsData then
+        local tdObj = Modules and Modules:FindFirstChild("Data") and Modules.Data:FindFirstChild("TraitsData")
+        if tdObj then
+            local ok, d = pcall(require, tdObj)
+            if ok then cachedTraitsData = d end
+        end
+    end
+    return cachedTraitsModule, cachedTraitsData
+end
+
+local function FindUnitByUUID(inventory, targetUUID)
+    if not inventory or type(inventory) ~= "table" then return nil end
+    if not targetUUID or targetUUID == "" then return nil end
+
+    if inventory[targetUUID] and type(inventory[targetUUID]) == "table" then
+        return inventory[targetUUID]
+    end
+
+    for _, u in pairs(inventory) do
+        if type(u) == "table" and u.UUID == targetUUID then
+            return u
+        end
+    end
+
+    return nil
+end
+
+local function CheckIfTraitMatches(pTrait, sTrait, tm, TraitsData)
+    if not pTrait and not sTrait then return false, nil, nil, nil end
+
+    local primaryName = (TraitsData and TraitsData.TraitsData and TraitsData.TraitsData[pTrait] and TraitsData.TraitsData[pTrait].TraitDisplayName) or pTrait
+    local subName = sTrait and ((TraitsData and TraitsData.TraitsData and TraitsData.TraitsData[sTrait] and TraitsData.TraitsData[sTrait].TraitDisplayName) or sTrait) or ""
+
+    -- 1. Check TargetTraits
+    for k, v in pairs(State.TargetTraits or {}) do
+        local target = (type(k) == "string" and v == true) and k or v
+        if type(target) == "string" and target ~= "" then
+            if target == pTrait or target == primaryName or (sTrait and (target == sTrait or target == subName)) then
+                return true, primaryName, subName, "TargetTrait"
+            end
+        end
+    end
+
+    -- 2. Check In-Game Stop List
+    if State.RespectInGameStopList and tm and tm.StopConfig then
+        if (pTrait and tm.StopConfig[pTrait] == true) or (sTrait and tm.StopConfig[sTrait] == true) then
+            return true, primaryName, subName, "InGameStopList"
+        end
+    end
+
+    return false, primaryName, subName, nil
+end
+
+local function ProcessAutoTraitReroll()
+    if not State.AutoTraitReroll or not isLobby or isAutoRollingTraits then return end
+    local RerollTraitRemote = Remotes and Remotes:FindFirstChild("RerollTrait")
+    if not RerollTraitRemote then return end
+
+    local pData = GetReplicaData()
+    if not pData or not pData.Inventory then return end
+
+    local targetUUID = State.TraitRerollTargetUnit
+    local unitObj = nil
+    if targetUUID and targetUUID ~= "" then
+        unitObj = FindUnitByUUID(pData.Inventory, targetUUID)
+    end
+
+    if not unitObj and pData.EquippedSlots and pData.EquippedSlots[1] then
+        targetUUID = pData.EquippedSlots[1]
+        unitObj = FindUnitByUUID(pData.Inventory, targetUUID)
+    end
+
+    if not unitObj or not targetUUID then
+        State.AutoTraitReroll = false
+        if MacLib.Options["Toggle_AutoTraitReroll"] then
+            pcall(function() MacLib.Options["Toggle_AutoTraitReroll"]:UpdateState(false) end)
+        end
+        return
+    end
+
+    local tm, TraitsData = GetTraitsModules()
+
+    -- SAFETY PRE-CHECK BEFORE ROLLING: Check if unit already has target / stop trait!
+    local alreadyMatches, curPName, curSName = CheckIfTraitMatches(unitObj.Trait, unitObj.SubTrait, tm, TraitsData)
+    if alreadyMatches then
+        State.AutoTraitReroll = false
+        if MacLib.Options["Toggle_AutoTraitReroll"] then
+            pcall(function() MacLib.Options["Toggle_AutoTraitReroll"]:UpdateState(false) end)
+        end
+        pcall(function()
+            MacLib:Notify({
+                Title = "Trait Protected!",
+                Description = "Unit already has target trait: " .. tostring(curPName) .. (curSName ~= "" and (" / " .. curSName) or "") .. "!\nAuto Reroll stopped to prevent losing it.",
+                Lifetime = 6
+            })
+        end)
+        return
+    end
+
+    local traitItemCount = (pData.ItemInventory and pData.ItemInventory.Trait) or 0
+    if traitItemCount <= 0 then
+        State.AutoTraitReroll = false
+        if MacLib.Options["Toggle_AutoTraitReroll"] then
+            pcall(function() MacLib.Options["Toggle_AutoTraitReroll"]:UpdateState(false) end)
+        end
+        pcall(function()
+            MacLib:Notify({
+                Title = "Auto Trait Reroll",
+                Description = "Out of Trait items!",
+                Lifetime = 4
+            })
+        end)
+        return
+    end
+
+    isAutoRollingTraits = true
+    task.spawn(function()
+        while isScriptRunning and State.AutoTraitReroll and isLobby do
+            local currentPData = GetReplicaData()
+            if not currentPData or not currentPData.Inventory then
+                task.wait(0.1)
+                continue
+            end
+
+            -- Re-verify unit in inventory
+            local curUnit = FindUnitByUUID(currentPData.Inventory, targetUUID)
+            if not curUnit then
+                State.AutoTraitReroll = false
+                if MacLib.Options["Toggle_AutoTraitReroll"] then
+                    pcall(function() MacLib.Options["Toggle_AutoTraitReroll"]:UpdateState(false) end)
+                end
+                break
+            end
+
+            -- Pre-check before each roll in loop
+            local isPreMatch, pNamePre, sNamePre = CheckIfTraitMatches(curUnit.Trait, curUnit.SubTrait, tm, TraitsData)
+            if isPreMatch then
+                State.AutoTraitReroll = false
+                if MacLib.Options["Toggle_AutoTraitReroll"] then
+                    pcall(function() MacLib.Options["Toggle_AutoTraitReroll"]:UpdateState(false) end)
+                end
+                pcall(function()
+                    MacLib:Notify({
+                        Title = "Trait Protected!",
+                        Description = "Unit already has: " .. tostring(pNamePre) .. (sNamePre ~= "" and (" / " .. sNamePre) or "") .. "!",
+                        Lifetime = 5
+                    })
+                end)
+                break
+            end
+
+            local itemsLeft = (currentPData.ItemInventory and currentPData.ItemInventory.Trait) or 0
+            if itemsLeft <= 0 then
+                State.AutoTraitReroll = false
+                if MacLib.Options["Toggle_AutoTraitReroll"] then
+                    pcall(function() MacLib.Options["Toggle_AutoTraitReroll"]:UpdateState(false) end)
+                end
+                pcall(function()
+                    MacLib:Notify({
+                        Title = "Auto Trait Reroll",
+                        Description = "Out of Trait items!",
+                        Lifetime = 4
+                    })
+                end)
+                break
+            end
+
+            -- Execute Remote
+            local ok, success, pTrait, sTrait = pcall(function()
+                return RerollTraitRemote:InvokeServer(targetUUID)
+            end)
+
+            if not ok or not success then
+                State.AutoTraitReroll = false
+                if MacLib.Options["Toggle_AutoTraitReroll"] then
+                    pcall(function() MacLib.Options["Toggle_AutoTraitReroll"]:UpdateState(false) end)
+                end
+                break
+            end
+
+            -- Post-roll check
+            local isPostMatch, pNamePost, sNamePost = CheckIfTraitMatches(pTrait, sTrait, tm, TraitsData)
+            if isPostMatch then
+                State.AutoTraitReroll = false
+                if MacLib.Options["Toggle_AutoTraitReroll"] then
+                    pcall(function() MacLib.Options["Toggle_AutoTraitReroll"]:UpdateState(false) end)
+                end
+                pcall(function()
+                    MacLib:Notify({
+                        Title = "Auto Trait Reroll",
+                        Description = "🎯 Target Trait Reached: " .. tostring(pNamePost) .. (sNamePost ~= "" and (" / " .. sNamePost) or "") .. "!",
+                        Lifetime = 5
+                    })
+                end)
+                break
+            end
+
+            local delayTime = tonumber(State.TraitRerollDelay) or 0.02
+            if delayTime > 0 then
+                task.wait(delayTime)
+            else
+                task.wait()
+            end
+        end
+
+        isAutoRollingTraits = false
+    end)
+end
+
+-- ====================================================================
+-- PARTY SYSTEM (Host / Alt Room Coordination, Invites, Follow)
+-- ====================================================================
+local PARTY_HOST_FILE = "STRIX HUB/party_host.json"
+local RefreshAltsUIRef = nil
+local UpdateAltsParagraphRef = nil
+local lastPartyWaitNotification = 0
+local lastAltUiRefresh = 0
+
+local function NormalizeUsername(name)
+    if not name then return "" end
+    return string.gsub(tostring(name), "%s+", "")
+end
+
+local function GetPartyAltsList()
+    local list = {}
+    if type(State.PartyAlts) == "table" then
+        for _, name in ipairs(State.PartyAlts) do
+            local clean = NormalizeUsername(name)
+            if clean ~= "" then
+                table.insert(list, clean)
+            end
+        end
+    end
+    if #list == 0 and type(State.PartyAltsWhitelist) == "string" and State.PartyAltsWhitelist ~= "" then
+        for name in string.gmatch(State.PartyAltsWhitelist, "[^,;%s]+") do
+            table.insert(list, name)
+        end
+    end
+    return list
+end
+
+local function GetPlayersInRoom()
+    local playersInRoom = {}
+    local PlayGUI = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("PlayGUI")
+    local pf = PlayGUI and PlayGUI:FindFirstChild("PlayFrame")
+    local container = pf and pf:FindFirstChild("Details") and pf.Details:FindFirstChild("Player") and pf.Details.Player:FindFirstChild("Container")
+    if container then
+        for _, child in ipairs(container:GetChildren()) do
+            if string.sub(child.Name, 1, 7) == "Player_" then
+                local pName = string.sub(child.Name, 8)
+                if pName ~= "" then
+                    table.insert(playersInRoom, pName)
+                end
+            end
+        end
+    end
+    return playersInRoom
+end
+
+local function AreAllAltsInRoom()
+    local alts = GetPartyAltsList()
+    if #alts == 0 then
+        return true, {}
+    end
+    local inRoom = GetPlayersInRoom()
+    local missingAlts = {}
+    for _, altName in ipairs(alts) do
+        local found = false
+        local lowerAlt = string.lower(altName)
+        for _, roomUser in ipairs(inRoom) do
+            if string.lower(roomUser) == lowerAlt then
+                found = true
+                break
+            end
+        end
+        if not found then
+            table.insert(missingAlts, altName)
+        end
+    end
+    return (#missingAlts == 0), missingAlts
+end
+
+local function ProcessPartySystem()
+    if not State.PartyEnabled or not isLobby then return end
+
+    local altsList = GetPartyAltsList()
+
+    -- HOST ROLE
+    if State.PartyRole == "Host" then
+        pcall(function()
+            local hostInfo = {
+                Host = LocalPlayer.Name,
+                HostUserId = LocalPlayer.UserId,
+                JobId = game.JobId,
+                PlaceId = game.PlaceId,
+                Timestamp = os.time(),
+                InRoom = IsRoomCreated()
+            }
+            writefile(PARTY_HOST_FILE, HttpService:JSONEncode(hostInfo))
+        end)
+
+        if IsRoomCreated() then
+            -- Auto Invite Alts
+            if State.PartyAutoInvite then
+                local LobbyInvite = Remotes and Remotes:FindFirstChild("LobbyInvite")
+                if LobbyInvite then
+                    local inRoom = GetPlayersInRoom()
+                    for _, player in ipairs(Players:GetPlayers()) do
+                        if player ~= LocalPlayer then
+                            local pLower = string.lower(player.Name)
+                            local isAlt = false
+                            for _, a in ipairs(altsList) do
+                                if string.lower(a) == pLower then
+                                    isAlt = true
+                                    break
+                                end
+                            end
+                            local alreadyIn = false
+                            for _, rName in ipairs(inRoom) do
+                                if string.lower(rName) == pLower then
+                                    alreadyIn = true
+                                    break
+                                end
+                            end
+                            if isAlt and not alreadyIn then
+                                pcall(function() LobbyInvite:FireServer(player) end)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+    -- ALT ROLE
+    elseif State.PartyRole == "Alt" then
+        local targetHost = string.lower(NormalizeUsername(State.PartyHost or ""))
+        if targetHost == "" then return end
+
+        -- 1. Auto Follow Host Server
+        if State.PartyAutoFollow and isfile and isfile(PARTY_HOST_FILE) then
+            local ok, info = pcall(function() return HttpService:JSONDecode(readfile(PARTY_HOST_FILE)) end)
+            if ok and type(info) == "table" and string.lower(NormalizeUsername(info.Host or "")) == targetHost then
+                if info.JobId and info.JobId ~= game.JobId and os.time() - (info.Timestamp or 0) < 60 then
+                    pcall(function()
+                        game:GetService("TeleportService"):TeleportToPlaceInstance(info.PlaceId or game.PlaceId, info.JobId, LocalPlayer)
+                    end)
+                    task.wait(5)
+                    return
+                end
+            end
+        end
+
+        -- 2. Join Host's Room in same server
+        if (State.PartyAutoJoin ~= false) and not IsRoomCreated() then
+            local GetLobbyList = Remotes and Remotes:FindFirstChild("GetLobbyList")
+            local RequestJoinLobby = Remotes and Remotes:FindFirstChild("RequestJoinLobby")
+            if GetLobbyList and RequestJoinLobby then
+                local ok, lobbies = pcall(function() return GetLobbyList:InvokeServer() end)
+                if ok and type(lobbies) == "table" then
+                    for _, room in ipairs(lobbies) do
+                        if string.lower(NormalizeUsername(room.HostName or "")) == targetHost then
+                            pcall(function()
+                                RequestJoinLobby:InvokeServer("Join", room.RoomId)
+                            end)
+                            break
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if os.clock() - lastAltUiRefresh > 2.5 then
+        lastAltUiRefresh = os.clock()
+        if UpdateAltsParagraphRef then
+            pcall(UpdateAltsParagraphRef)
+        end
+    end
+end
+
+-- Alt Invite Auto-Accept Listener
+pcall(function()
+    local LobbyInvite = Remotes and Remotes:FindFirstChild("LobbyInvite")
+    local RequestJoinLobby = Remotes and Remotes:FindFirstChild("RequestJoinLobby")
+    if LobbyInvite and RequestJoinLobby then
+        LobbyInvite.OnClientEvent:Connect(function(hostPlayer, roomId)
+            if State.PartyEnabled and State.PartyRole == "Alt" and (State.PartyAutoJoin ~= false) and hostPlayer then
+                local targetHost = string.lower(NormalizeUsername(State.PartyHost or ""))
+                local hName = string.lower(hostPlayer.Name or "")
+                local hDisplay = string.lower(hostPlayer.DisplayName or "")
+                if targetHost ~= "" and (hName == targetHost or hDisplay == targetHost) then
+                    pcall(function()
+                        RequestJoinLobby:InvokeServer("Join", roomId)
+                    end)
+                end
+            end
+        end)
+    end
+end)
+
+--// Feature: Auto Leave Stage When Host Leaves
+local hostSeenInBattle = false
+local hostCheckStartTime = os.clock()
+
+local function GetResolvedPartyHost()
+    local hostName = NormalizeUsername(State.PartyHost or "")
+    if hostName ~= "" then
+        return hostName
+    end
+    if isfile and isfile(PARTY_HOST_FILE) then
+        local ok, info = pcall(function() return HttpService:JSONDecode(readfile(PARTY_HOST_FILE)) end)
+        if ok and type(info) == "table" and info.Host and info.Host ~= "" then
+            return NormalizeUsername(info.Host)
+        end
+    end
+    return nil
+end
+
+CheckHostLeftAndAutoLeave = function()
+    if not isBattlePlace or hasHandledLeave then return end
+    if not State.PartyAutoLeaveOnHostLeave then return end
+    if State.PartyRole == "Host" then return end
+
+    local targetHost = GetResolvedPartyHost()
+    if not targetHost or targetHost == "" then return end
+
+    local myName = string.lower(NormalizeUsername(LocalPlayer.Name))
+    local tLower = string.lower(targetHost)
+    if tLower == myName then return end
+
+    local isHostPresent = false
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            local pName = string.lower(NormalizeUsername(p.Name))
+            local pDisplay = string.lower(NormalizeUsername(p.DisplayName))
+            if pName == tLower or pDisplay == tLower then
+                isHostPresent = true
+                hostSeenInBattle = true
+                break
+            end
+        end
+    end
+
+    if hostSeenInBattle then
+        if not isHostPresent then
+            print("[STRIX HUB] Host (" .. targetHost .. ") has left the match. Auto leaving to lobby...")
+            ExecuteLeaveToLobby("Host Left", "Host has left the match! Returning to Lobby...")
+            return
+        end
+    else
+        -- Host has not been seen yet in this match
+        -- 1. Check if host's file already shows host has left or returned to Lobby
+        if isfile and isfile(PARTY_HOST_FILE) then
+            local ok, info = pcall(function() return HttpService:JSONDecode(readfile(PARTY_HOST_FILE)) end)
+            if ok and type(info) == "table" and info.Host and string.lower(NormalizeUsername(info.Host)) == tLower then
+                local isHostInLobby = (info.PlaceId == LOBBY_PLACE_ID or info.PlaceId == LOBBY_ALT_PLACE_ID)
+                if isHostInLobby and os.time() - (info.Timestamp or 0) < 60 then
+                    print("[STRIX HUB] Host file indicates host is in Lobby. Leaving to lobby...")
+                    ExecuteLeaveToLobby("Host Left", "Host is in Lobby! Returning to Lobby...")
+                    return
+                end
+            end
+        end
+
+        -- 2. Grace period: Wait up to 45 seconds for host to join before considering abandoned
+        if os.clock() - hostCheckStartTime > 45 then
+            print("[STRIX HUB] Host (" .. targetHost .. ") did not join match after 45s. Returning to Lobby...")
+            ExecuteLeaveToLobby("Host Missing", "Host not found after 45s! Returning to Lobby...")
+            return
+        end
+    end
+end
+
+-- Fast reactive detection for Host leaving match
+pcall(function()
+    Players.PlayerRemoving:Connect(function(player)
+        if not isBattlePlace or hasHandledLeave then return end
+        if not State.PartyAutoLeaveOnHostLeave then return end
+        if State.PartyRole == "Host" then return end
+
+        local targetHost = GetResolvedPartyHost()
+        if not targetHost or targetHost == "" then return end
+
+        local myName = string.lower(NormalizeUsername(LocalPlayer.Name))
+        local tLower = string.lower(targetHost)
+        if tLower == myName then return end
+
+        local pName = string.lower(NormalizeUsername(player.Name))
+        local pDisplay = string.lower(NormalizeUsername(player.DisplayName))
+
+        if pName == tLower or pDisplay == tLower then
+            print("[STRIX HUB] Host (" .. player.Name .. ") left the match! Triggering auto-leave to lobby...")
+            task.delay(1, function()
+                if not hasHandledLeave and isBattlePlace then
+                    ExecuteLeaveToLobby("Host Left", "Host has left the match! Returning to Lobby...")
+                end
+            end)
+        end
+    end)
+end)
+
 --// Feature 2: Stage Unlock Validation
 local function ValidateMapAndStage(mapId, stageNum, mode)
     if not StageUnlockHelper then
@@ -1723,20 +2662,6 @@ local function ValidateMapAndStage(mapId, stageNum, mode)
     end
 
     return true, "Unlocked"
-end
-
-local function GetHighestUnlockedStage(mapId, totalStages, mode)
-    local highest = 1
-    local total = totalStages or 1
-    for s = 1, total do
-        local ok = ValidateMapAndStage(mapId, s, mode)
-        if ok then
-            highest = s
-        else
-            break
-        end
-    end
-    return highest
 end
 
 --// Feature 3: Robust Room Creation & Direct Server Sync
@@ -1856,8 +2781,8 @@ end
 
 --// Feature 4: Dual-Trigger Match Start & Teleport Reliability
 local lastMatchStartTrigger = 0
-local function TriggerMatchStart(overrideMode, overrideMap, overrideStage, overrideDiff)
-    if os.clock() - lastMatchStartTrigger < 2.0 then
+local function TriggerMatchStart(overrideMode, overrideMap, overrideStage, overrideDiff, force)
+    if not force and os.clock() - lastMatchStartTrigger < 2.0 then
         return false, "Debounce"
     end
     
@@ -1866,6 +2791,24 @@ local function TriggerMatchStart(overrideMode, overrideMap, overrideStage, overr
     
     if room.IsTeleporting then
         return true, "Already teleporting"
+    end
+
+    -- Party System Gate: If Party is enabled and role is Host, wait for all ALTs before match start
+    if not force and State.PartyEnabled and State.PartyRole == "Host" then
+        local allIn, missing = AreAllAltsInRoom()
+        if not allIn and #missing > 0 then
+            if os.clock() - lastPartyWaitNotification > 4.0 then
+                lastPartyWaitNotification = os.clock()
+                pcall(function()
+                    MacLib:Notify({
+                        Title = "Party System",
+                        Description = "⏳ Waiting for ALTs (" .. #missing .. " missing): " .. table.concat(missing, ", "),
+                        Lifetime = 3.5
+                    })
+                end)
+            end
+            return false, "Waiting for ALTs"
+        end
     end
     
     if room.Gui and not room.Gui.Enabled then
@@ -2542,8 +3485,11 @@ local TabGroup = Window:TabGroup()
 local Tabs = {
     AutoCreate = TabGroup:Tab({ Name = "Auto Create", Image = "rbxassetid://10709782230" }), -- lucide-bot
     Challenges = TabGroup:Tab({ Name = "Challenges", Image = "rbxassetid://10734975692" }), -- lucide-swords
+    Party = TabGroup:Tab({ Name = "Party", Image = "rbxassetid://10747373426" }), -- lucide-users
     Gameplay = TabGroup:Tab({ Name = "Gameplay", Image = "rbxassetid://10723395215" }), -- lucide-gamepad-2
+    Units = TabGroup:Tab({ Name = "Units & Items", Image = "rbxassetid://10734966248" }), -- lucide-star
     SummonShop = TabGroup:Tab({ Name = "Summon & Shop", Image = "rbxassetid://10734952479" }), -- lucide-shopping-cart
+    Webhook = TabGroup:Tab({ Name = "Webhook", Image = "rbxassetid://10709775704" }), -- lucide-bell
     Settings = TabGroup:Tab({ Name = "Settings", Image = "rbxassetid://10734950309" }) -- lucide-settings
 }
 
@@ -2982,7 +3928,491 @@ ChallengeSections.Info:Button({
 })
 
 -- ====================================================================
--- TAB 3: GAMEPLAY
+-- TAB: UNITS & ITEMS (Capsules, Feed, Evolve, Traits)
+-- ====================================================================
+local UnitsSections = {
+    Capsules = Tabs.Units:Section({ Side = "Left" }),
+    FeedEvolve = Tabs.Units:Section({ Side = "Left" }),
+    Traits = Tabs.Units:Section({ Side = "Right" })
+}
+
+-- 1. Capsules Section
+UnitsSections.Capsules:Header({ Text = "Capsule Automation" })
+
+UnitsSections.Capsules:Toggle({
+    Name = "Auto Open All Capsules",
+    Default = (State.AutoOpenCapsules == true),
+    Callback = function(val)
+        State.AutoOpenCapsules = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_AutoOpenCapsules")
+
+UnitsSections.Capsules:Slider({
+    Name = "Safety Buffer Slots",
+    Minimum = 1,
+    Maximum = 10,
+    Min = 1,
+    Max = 10,
+    Default = State.CapsuleMinFreeSlots or 2,
+    Callback = function(val)
+        State.CapsuleMinFreeSlots = val
+        SaveConfigDebounced()
+    end
+}, "Slider_CapsuleMinFreeSlots")
+
+UnitsSections.Capsules:Button({
+    Name = "Open Safe Batch Now",
+    Callback = function()
+        ProcessAutoOpenCapsules()
+    end
+})
+
+-- 2. Feed Section
+UnitsSections.FeedEvolve:Header({ Text = "Auto Feed" })
+
+UnitsSections.FeedEvolve:Toggle({
+    Name = "Auto Feed to Max Level",
+    Default = (State.AutoFeed == true),
+    Callback = function(val)
+        State.AutoFeed = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_AutoFeed")
+
+UnitsSections.FeedEvolve:Dropdown({
+    Name = "Feed Target",
+    Multi = false,
+    Required = true,
+    Options = { "Equipped Units", "All Units" },
+    Default = State.AutoFeedTarget == "All" and "All Units" or "Equipped Units",
+    Callback = function(val)
+        State.AutoFeedTarget = (val == "All Units") and "All" or "Equipped"
+        SaveConfigDebounced()
+    end
+}, "Dropdown_AutoFeedTarget")
+
+-- 3. Traits Section
+UnitsSections.Traits:Header({ Text = "Trait Reroll Automation" })
+
+UnitsSections.Traits:Toggle({
+    Name = "Auto Trait Reroll",
+    Default = (State.AutoTraitReroll == true),
+    Callback = function(val)
+        State.AutoTraitReroll = val
+        SaveConfigDebounced()
+        if val then
+            task.spawn(ProcessAutoTraitReroll)
+        end
+    end
+}, "Toggle_AutoTraitReroll")
+
+UnitsSections.Traits:Slider({
+    Name = "Reroll Delay (Seconds)",
+    Minimum = 0,
+    Maximum = 0.5,
+    Default = State.TraitRerollDelay or 0.02,
+    Precision = 2,
+    Callback = function(val)
+        State.TraitRerollDelay = val
+        SaveConfigDebounced()
+    end
+}, "Slider_TraitRerollDelay")
+
+local traitOptions = {
+    -- Mythic (God Tier)
+    "Absolute Ego",
+    "Twin Stars",
+    "Efficient King",
+    "Aura Burst",
+    "Phantom Blade",
+    "Eternal Guardian",
+    -- Legendary (High Tier)
+    "Cross X",
+    "Puch Burst",
+    "Health Devil",
+    "Enegy Arrow",
+    -- Epic (Mid Tier)
+    "Executioner",
+    "Sharpshooter",
+    "Skillful",
+    "Haste",
+    -- Rare (Low Tier)
+    "Human Damage",
+    "Human AS",
+    "Human Range",
+    "Human Health"
+}
+
+UnitsSections.Traits:Dropdown({
+    Name = "Target Traits",
+    Multi = true,
+    Required = false,
+    Options = traitOptions,
+    Default = State.TargetTraits or { "Absolute Ego", "Twin Stars", "Aura Burst" },
+    Callback = function(val)
+        local selectedList = {}
+        if type(val) == "table" then
+            for k, v in pairs(val) do
+                if type(k) == "string" and v == true then
+                    table.insert(selectedList, k)
+                elseif type(v) == "string" then
+                    table.insert(selectedList, v)
+                end
+            end
+        end
+        State.TargetTraits = selectedList
+        SaveConfigDebounced()
+    end
+}, "Dropdown_TargetTraits")
+
+UnitsSections.Traits:Toggle({
+    Name = "Respect In-Game Stop List",
+    Default = (State.RespectInGameStopList ~= false),
+    Callback = function(val)
+        State.RespectInGameStopList = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_RespectInGameStopList")
+
+UnitsSections.Traits:Button({
+    Name = "Reroll Trait Once",
+    Callback = function()
+        local RerollTraitRemote = Remotes and Remotes:FindFirstChild("RerollTrait")
+        local pData = GetReplicaData()
+        local targetUUID = State.TraitRerollTargetUnit
+        local unitObj = FindUnitByUUID(pData and pData.Inventory, targetUUID)
+        if not unitObj and pData and pData.EquippedSlots and pData.EquippedSlots[1] then
+            targetUUID = pData.EquippedSlots[1]
+            unitObj = FindUnitByUUID(pData.Inventory, targetUUID)
+        end
+
+        if unitObj and targetUUID then
+            local tm, TraitsData = GetTraitsModules()
+            local isMatch, primaryName, subName = CheckIfTraitMatches(unitObj.Trait, unitObj.SubTrait, tm, TraitsData)
+            if isMatch then
+                pcall(function()
+                    MacLib:Notify({
+                        Title = "Reroll Protected",
+                        Description = "Unit already has target trait: " .. tostring(primaryName) .. (subName ~= "" and (" / " .. subName) or "") .. "!\nDeselect trait from Target Traits to reroll.",
+                        Lifetime = 5
+                    })
+                end)
+                return
+            end
+        end
+
+        if RerollTraitRemote and targetUUID then
+            pcall(function() RerollTraitRemote:InvokeServer(targetUUID) end)
+        end
+    end
+})
+
+-- ====================================================================
+-- TAB: PARTY (Party System & Host Invite)
+-- ====================================================================
+local PartySections = {
+    System = Tabs.Party:Section({ Side = "Left" }),
+    HostInvite = Tabs.Party:Section({ Side = "Right" })
+}
+
+-- [Menu] Left Side: Party System
+PartySections.System:Header({ Text = "Party System" })
+
+PartySections.System:Toggle({
+    Name = "Enable Party",
+    Default = (State.PartyEnabled == true),
+    Callback = function(val)
+        State.PartyEnabled = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_PartyEnabled")
+
+PartySections.System:Dropdown({
+    Name = "Party Role",
+    Multi = false,
+    Required = true,
+    Options = { "Host", "Alt" },
+    Default = (State.PartyRole == "Alt") and "Alt" or "Host",
+    Callback = function(val)
+        State.PartyRole = val
+        SaveConfigDebounced()
+    end
+}, "Dropdown_PartyRole")
+
+PartySections.System:Input({
+    Name = "Host Username",
+    Placeholder = "Enter Host Username...",
+    Default = State.PartyHost or "",
+    Callback = function(val)
+        State.PartyHost = val
+        SaveConfigDebounced()
+    end
+}, "Input_PartyHost")
+
+PartySections.System:Toggle({
+    Name = "Auto join host room",
+    Default = (State.PartyAutoJoin ~= false),
+    Callback = function(val)
+        State.PartyAutoJoin = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_PartyAutoJoin")
+
+PartySections.System:Toggle({
+    Name = "Auto Follow Host Server",
+    Default = (State.PartyAutoFollow ~= false),
+    Callback = function(val)
+        State.PartyAutoFollow = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_PartyAutoFollow")
+
+PartySections.System:Toggle({
+    Name = "Auto Leave When Host Leaves",
+    Default = (State.PartyAutoLeaveOnHostLeave ~= false),
+    Callback = function(val)
+        State.PartyAutoLeaveOnHostLeave = val
+        SaveConfigDebounced()
+        if val and isBattlePlace and CheckHostLeftAndAutoLeave then
+            task.spawn(function()
+                pcall(CheckHostLeftAndAutoLeave)
+            end)
+        end
+    end
+}, "Toggle_PartyAutoLeaveOnHostLeave")
+
+-- [Menu] Right Side: Host Invite
+PartySections.HostInvite:Header({ Text = "Host Invite" })
+
+PartySections.HostInvite:Toggle({
+    Name = "Auto Invite Alts",
+    Default = (State.PartyAutoInvite ~= false),
+    Callback = function(val)
+        State.PartyAutoInvite = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_PartyAutoInvite")
+
+local currentAltInputText = ""
+local altsListParagraph
+local removeAltDropdown
+local selectedAltToRemove = ""
+
+local function FormatAltsParagraphBody()
+    local list = GetPartyAltsList()
+    if #list == 0 then
+        return "(No Alts in whitelist. Enter a username above to add)"
+    end
+    local inRoom = GetPlayersInRoom()
+    local lines = {}
+    for i, name in ipairs(list) do
+        local inRoomStr = ""
+        for _, rName in ipairs(inRoom) do
+            if string.lower(rName) == string.lower(name) then
+                inRoomStr = " [In Room]"
+                break
+            end
+        end
+        table.insert(lines, string.format("%d. %s%s", i, name, inRoomStr))
+    end
+    return table.concat(lines, "\n")
+end
+
+local function GetRemoveDropdownOptions()
+    local list = GetPartyAltsList()
+    if #list == 0 then
+        return { "(None)" }
+    end
+    return list
+end
+
+local function UpdateAltsParagraph()
+    local alts = GetPartyAltsList()
+    if altsListParagraph and altsListParagraph.UpdateHeader and altsListParagraph.UpdateBody then
+        pcall(function()
+            altsListParagraph:UpdateHeader("Alts List (" .. #alts .. ")")
+            altsListParagraph:UpdateBody(FormatAltsParagraphBody())
+        end)
+    end
+end
+UpdateAltsParagraphRef = UpdateAltsParagraph
+
+local function RefreshAltsUI()
+    UpdateAltsParagraph()
+    if removeAltDropdown and removeAltDropdown.ClearOptions and removeAltDropdown.InsertOptions then
+        local alts = GetPartyAltsList()
+        pcall(function()
+            removeAltDropdown:ClearOptions()
+            local opts = GetRemoveDropdownOptions()
+            removeAltDropdown:InsertOptions(opts)
+            if #alts > 0 then
+                selectedAltToRemove = alts[1]
+                removeAltDropdown:UpdateSelection(alts[1])
+            else
+                selectedAltToRemove = ""
+                removeAltDropdown:UpdateSelection("(None)")
+            end
+        end)
+    end
+end
+RefreshAltsUIRef = RefreshAltsUI
+
+local altInputObj = PartySections.HostInvite:Input({
+    Name = "Alts Whitelist Username",
+    Placeholder = "Enter Alt Username...",
+    Default = "",
+    Callback = function(val)
+        currentAltInputText = val
+    end
+}, "Input_PartyAltUsername")
+
+PartySections.HostInvite:Button({
+    Name = "Add Alt to Whitelist",
+    Callback = function()
+        local nameToAdd = currentAltInputText
+        if (not nameToAdd or nameToAdd == "") and altInputObj and altInputObj.GetInput then
+            pcall(function() nameToAdd = altInputObj:GetInput() end)
+        end
+        nameToAdd = NormalizeUsername(nameToAdd or "")
+        if nameToAdd == "" then
+            pcall(function()
+                MacLib:Notify({
+                    Title = "Whitelist",
+                    Description = "Please enter an Alt username first!",
+                    Lifetime = 3
+                })
+            end)
+            return
+        end
+
+        local lower = string.lower(nameToAdd)
+        local exists = false
+        for _, n in ipairs(State.PartyAlts or {}) do
+            if string.lower(n) == lower then
+                exists = true
+                break
+            end
+        end
+
+        if exists then
+            pcall(function()
+                MacLib:Notify({
+                    Title = "Whitelist",
+                    Description = nameToAdd .. " is already in the whitelist!",
+                    Lifetime = 3
+                })
+            end)
+            return
+        end
+
+        if type(State.PartyAlts) ~= "table" then
+            State.PartyAlts = {}
+        end
+        table.insert(State.PartyAlts, nameToAdd)
+        State.PartyAltsWhitelist = table.concat(State.PartyAlts, ", ")
+        SaveConfigDebounced()
+
+        currentAltInputText = ""
+        if altInputObj and altInputObj.UpdateText then
+            pcall(function() altInputObj:UpdateText("") end)
+        end
+
+        RefreshAltsUI()
+
+        pcall(function()
+            MacLib:Notify({
+                Title = "Whitelist",
+                Description = "Added " .. nameToAdd .. " to Whitelist!",
+                Lifetime = 3
+            })
+        end)
+    end
+})
+
+PartySections.HostInvite:Divider()
+
+altsListParagraph = PartySections.HostInvite:Paragraph({
+    Header = "Alts List (" .. #GetPartyAltsList() .. ")",
+    Body = FormatAltsParagraphBody()
+}, "Paragraph_AltsList")
+
+removeAltDropdown = PartySections.HostInvite:Dropdown({
+    Name = "Select Alt to Remove",
+    Multi = false,
+    Required = false,
+    Options = GetRemoveDropdownOptions(),
+    Default = (function()
+        local l = GetPartyAltsList()
+        return (#l > 0) and l[1] or "(None)"
+    end)(),
+    Callback = function(val)
+        selectedAltToRemove = val
+    end
+}, "Dropdown_RemoveAlt")
+
+PartySections.HostInvite:Button({
+    Name = "Remove Selected Alt",
+    Callback = function()
+        local target = selectedAltToRemove
+        if not target or target == "" or target == "(None)" then
+            pcall(function()
+                MacLib:Notify({
+                    Title = "Whitelist",
+                    Description = "No Alt selected to remove!",
+                    Lifetime = 3
+                })
+            end)
+            return
+        end
+
+        local lowerTarget = string.lower(target)
+        local newList = {}
+        local removed = false
+        for _, n in ipairs(State.PartyAlts or {}) do
+            if string.lower(n) == lowerTarget then
+                removed = true
+            else
+                table.insert(newList, n)
+            end
+        end
+
+        if removed then
+            State.PartyAlts = newList
+            State.PartyAltsWhitelist = table.concat(newList, ", ")
+            SaveConfigDebounced()
+            RefreshAltsUI()
+            pcall(function()
+                MacLib:Notify({
+                    Title = "Whitelist",
+                    Description = "Removed " .. target .. " from Whitelist!",
+                    Lifetime = 3
+                })
+            end)
+        end
+    end
+})
+
+PartySections.HostInvite:Button({
+    Name = "Clear All Alts",
+    Callback = function()
+        if not State.PartyAlts or #State.PartyAlts == 0 then return end
+        State.PartyAlts = {}
+        State.PartyAltsWhitelist = ""
+        SaveConfigDebounced()
+        RefreshAltsUI()
+        pcall(function()
+            MacLib:Notify({
+                Title = "Whitelist",
+                Description = "Cleared all Alts from Whitelist!",
+                Lifetime = 3
+            })
+        end)
+    end
+})
+
+-- ====================================================================
+-- TAB 4: GAMEPLAY
 -- ====================================================================
 local GameplaySections = {
     Settings = Tabs.Gameplay:Section({ Side = "Left" }),
@@ -3034,20 +4464,6 @@ GameplaySections.Settings:Toggle({
 GameplaySections.Controls:Header({ Text = "Game Controls" })
 
 GameplaySections.Controls:Button({
-    Name = "Sync All In-Game Settings",
-    Callback = function()
-        for _, sInfo in ipairs(GameSettingsMap) do
-            SetGameSetting(sInfo.GuiName, State[sInfo.StateKey], sInfo.SettingKey)
-        end
-        Window:Notify({
-            Title = "Gameplay Settings",
-            Description = "Synchronized all settings with game!",
-            Lifetime = 3
-        })
-    end
-})
-
-GameplaySections.Controls:Button({
     Name = "Back To Spawn",
     Callback = function()
         pcall(function()
@@ -3086,6 +4502,91 @@ GameplaySections.Controls:Button({
         end)
     end
 })
+
+-- ====================================================================
+-- TAB: WEBHOOK (Discord Victory / Defeat Match Reporter)
+-- ====================================================================
+local WebhookSections = {
+    Setup = Tabs.Webhook:Section({ Side = "Left" }),
+    Outcomes = Tabs.Webhook:Section({ Side = "Right" })
+}
+
+WebhookSections.Setup:Header({ Text = "Discord Webhook Setup" })
+
+WebhookSections.Setup:Toggle({
+    Name = "Enable Webhook",
+    Default = (State.WebhookEnabled == true),
+    Callback = function(val)
+        State.WebhookEnabled = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_WebhookEnabled")
+
+WebhookSections.Setup:Input({
+    Name = "Webhook URL",
+    Placeholder = "https://discord.com/api/webhooks/...",
+    Default = State.WebhookUrl or "",
+    Callback = function(val)
+        State.WebhookUrl = val
+        SaveConfigDebounced()
+    end
+}, "Input_WebhookUrl")
+
+WebhookSections.Setup:Input({
+    Name = "Discord User ID (Optional Ping)",
+    Placeholder = "e.g. 123456789012345678",
+    Default = State.WebhookUserId or "",
+    Callback = function(val)
+        State.WebhookUserId = val
+        SaveConfigDebounced()
+    end
+}, "Input_WebhookUserId")
+
+WebhookSections.Setup:Button({
+    Name = "Send Test Webhook",
+    Callback = function()
+        SendDiscordWebhook({
+            title = "🧪 Webhook Test - STRIX HUB",
+            description = "Discord Webhook connection verified successfully!",
+            color = 3066993,
+            fields = {
+                { name = "🗺️ Map", value = "Namek World (Stage 1)", inline = true },
+                { name = "⏱️ Time", value = "03:45", inline = true },
+                { name = "⚔️ Damage", value = "1,250,000", inline = true },
+                { name = "👾 Mobs Killed", value = "95", inline = true },
+                { name = "✨ EXP", value = "+2,400 EXP", inline = true },
+                { name = "🎁 Rewards", value = "💎 500 Gems\n🪙 2,000 Coins", inline = false }
+            },
+            footer = { text = "STRIX HUB • Anime Mysterious | Account: " .. LocalPlayer.Name },
+            timestamp = DateTime.now():ToIsoDate()
+        })
+        Window:Notify({
+            Title = "Discord Webhook",
+            Description = "Test webhook request dispatched!",
+            Lifetime = 3
+        })
+    end
+})
+
+WebhookSections.Outcomes:Header({ Text = "Match Outcome Triggers" })
+
+WebhookSections.Outcomes:Toggle({
+    Name = "Send on Victory",
+    Default = (State.WebhookOnVictory ~= false),
+    Callback = function(val)
+        State.WebhookOnVictory = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_WebhookOnVictory")
+
+WebhookSections.Outcomes:Toggle({
+    Name = "Send on Defeat",
+    Default = (State.WebhookOnDefeat ~= false),
+    Callback = function(val)
+        State.WebhookOnDefeat = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_WebhookOnDefeat")
 
 -- ====================================================================
 -- TAB 4: SUMMON & SHOP
@@ -3791,6 +5292,26 @@ task.spawn(function()
         task.wait(1)
         if not isScriptRunning then break end
         if isLobby then
+            -- Party System
+            if State.PartyEnabled then
+                pcall(ProcessPartySystem)
+            end
+
+            -- Auto Open Capsules (Storage Safe)
+            if State.AutoOpenCapsules then
+                pcall(ProcessAutoOpenCapsules)
+            end
+
+            -- Auto Feed
+            if State.AutoFeed then
+                pcall(ProcessAutoFeed)
+            end
+
+            -- Auto Trait Reroll (Ensures fast worker stays active)
+            if State.AutoTraitReroll and not isAutoRollingTraits then
+                pcall(ProcessAutoTraitReroll)
+            end
+
             -- Priority 1: Auto Buy
             local didBuy = false
             if State.AutoBuyGems or State.AutoBuyGold then
@@ -3821,6 +5342,10 @@ task.spawn(function()
             end
         else
             -- Battle-only operations (In Gameplay)
+            if State.WebhookEnabled then
+                pcall(CheckAndSendMatchWebhook)
+            end
+
             if State.AutoSolveFateSword and workspace:GetAttribute("SwordEventActive") == true then
                 SolveFateSwordEvent()
             end
@@ -3834,6 +5359,10 @@ task.spawn(function()
             end
             if State.AutoLeaveOnChallengeReset then
                 CheckChallengeResetLeave()
+            end
+
+            if State.PartyAutoLeaveOnHostLeave and CheckHostLeftAndAutoLeave then
+                pcall(CheckHostLeftAndAutoLeave)
             end
         end
     end
@@ -4093,6 +5622,95 @@ LoadConfig = function()
             if MacLib.Options["Toggle_AutoDefendMoneyUnits"] then
                 pcall(function() MacLib.Options["Toggle_AutoDefendMoneyUnits"]:UpdateState(State.AutoDefendMoneyUnits) end)
             end
+        end
+
+        -- Webhook
+        if data.WebhookEnabled ~= nil and MacLib.Options["Toggle_WebhookEnabled"] then
+            pcall(function() MacLib.Options["Toggle_WebhookEnabled"]:UpdateState(data.WebhookEnabled) end)
+        end
+        if data.WebhookUrl and MacLib.Options["Input_WebhookUrl"] then
+            pcall(function() MacLib.Options["Input_WebhookUrl"]:UpdateText(data.WebhookUrl) end)
+        end
+        if data.WebhookUserId and MacLib.Options["Input_WebhookUserId"] then
+            pcall(function() MacLib.Options["Input_WebhookUserId"]:UpdateText(data.WebhookUserId) end)
+        end
+        if data.WebhookOnVictory ~= nil and MacLib.Options["Toggle_WebhookOnVictory"] then
+            pcall(function() MacLib.Options["Toggle_WebhookOnVictory"]:UpdateState(data.WebhookOnVictory) end)
+        end
+        if data.WebhookOnDefeat ~= nil and MacLib.Options["Toggle_WebhookOnDefeat"] then
+            pcall(function() MacLib.Options["Toggle_WebhookOnDefeat"]:UpdateState(data.WebhookOnDefeat) end)
+        end
+
+        -- Auto Open Capsules
+        if data.AutoOpenCapsules ~= nil and MacLib.Options["Toggle_AutoOpenCapsules"] then
+            pcall(function() MacLib.Options["Toggle_AutoOpenCapsules"]:UpdateState(data.AutoOpenCapsules) end)
+        end
+        if data.CapsuleMinFreeSlots and MacLib.Options["Slider_CapsuleMinFreeSlots"] then
+            pcall(function() MacLib.Options["Slider_CapsuleMinFreeSlots"]:UpdateValue(data.CapsuleMinFreeSlots) end)
+        end
+
+        -- Auto Feed & Evolve
+        if data.AutoFeed ~= nil and MacLib.Options["Toggle_AutoFeed"] then
+            pcall(function() MacLib.Options["Toggle_AutoFeed"]:UpdateState(data.AutoFeed) end)
+        end
+        if data.AutoFeedTarget and MacLib.Options["Dropdown_AutoFeedTarget"] then
+            pcall(function() MacLib.Options["Dropdown_AutoFeedTarget"]:UpdateSelection(data.AutoFeedTarget == "All" and "All Units" or "Equipped Units") end)
+        end
+        if data.AutoEvolve ~= nil and MacLib.Options["Toggle_AutoEvolve"] then
+            pcall(function() MacLib.Options["Toggle_AutoEvolve"]:UpdateState(data.AutoEvolve) end)
+        end
+
+        -- Auto Trait Reroll
+        if data.AutoTraitReroll ~= nil and MacLib.Options["Toggle_AutoTraitReroll"] then
+            pcall(function() MacLib.Options["Toggle_AutoTraitReroll"]:UpdateState(data.AutoTraitReroll) end)
+        end
+        if data.TargetTraits and MacLib.Options["Dropdown_TargetTraits"] then
+            pcall(function() MacLib.Options["Dropdown_TargetTraits"]:UpdateSelection(data.TargetTraits) end)
+        end
+        if data.RespectInGameStopList ~= nil and MacLib.Options["Toggle_RespectInGameStopList"] then
+            pcall(function() MacLib.Options["Toggle_RespectInGameStopList"]:UpdateState(data.RespectInGameStopList) end)
+        end
+        if data.TraitRerollDelay ~= nil and MacLib.Options["Slider_TraitRerollDelay"] then
+            pcall(function() MacLib.Options["Slider_TraitRerollDelay"]:UpdateValue(data.TraitRerollDelay) end)
+        end
+
+        -- Party System
+        if data.PartyEnabled ~= nil and MacLib.Options["Toggle_PartyEnabled"] then
+            pcall(function() MacLib.Options["Toggle_PartyEnabled"]:UpdateState(data.PartyEnabled) end)
+        elseif data.PartyRole == "Disabled" and MacLib.Options["Toggle_PartyEnabled"] then
+            pcall(function() MacLib.Options["Toggle_PartyEnabled"]:UpdateState(false) end)
+        end
+        local roleVal = (data.PartyRole == "Alt") and "Alt" or "Host"
+        if MacLib.Options["Dropdown_PartyRole"] then
+            pcall(function() MacLib.Options["Dropdown_PartyRole"]:UpdateSelection(roleVal) end)
+        end
+        if data.PartyHost and MacLib.Options["Input_PartyHost"] then
+            pcall(function() MacLib.Options["Input_PartyHost"]:UpdateText(data.PartyHost) end)
+        end
+        if type(data.PartyAlts) == "table" then
+            State.PartyAlts = data.PartyAlts
+            State.PartyAltsWhitelist = table.concat(data.PartyAlts, ", ")
+        elseif data.PartyAltsWhitelist and type(data.PartyAltsWhitelist) == "string" then
+            State.PartyAltsWhitelist = data.PartyAltsWhitelist
+            State.PartyAlts = {}
+            for name in string.gmatch(data.PartyAltsWhitelist, "[^,;%s]+") do
+                table.insert(State.PartyAlts, name)
+            end
+        end
+        if RefreshAltsUIRef then
+            pcall(RefreshAltsUIRef)
+        end
+        if data.PartyAutoInvite ~= nil and MacLib.Options["Toggle_PartyAutoInvite"] then
+            pcall(function() MacLib.Options["Toggle_PartyAutoInvite"]:UpdateState(data.PartyAutoInvite) end)
+        end
+        if data.PartyAutoFollow ~= nil and MacLib.Options["Toggle_PartyAutoFollow"] then
+            pcall(function() MacLib.Options["Toggle_PartyAutoFollow"]:UpdateState(data.PartyAutoFollow) end)
+        end
+        if data.PartyAutoJoin ~= nil and MacLib.Options["Toggle_PartyAutoJoin"] then
+            pcall(function() MacLib.Options["Toggle_PartyAutoJoin"]:UpdateState(data.PartyAutoJoin) end)
+        end
+        if data.PartyAutoLeaveOnHostLeave ~= nil and MacLib.Options["Toggle_PartyAutoLeaveOnHostLeave"] then
+            pcall(function() MacLib.Options["Toggle_PartyAutoLeaveOnHostLeave"]:UpdateState(data.PartyAutoLeaveOnHostLeave) end)
         end
     end)
     if not okMain then
