@@ -1323,13 +1323,42 @@ end
 
 local hasHandledLeave = false
 local isMatchFinished = false
+local hasSentMatchWebhook = false
+local lastWebhookDispatchTime = 0
+local battleStartTime = os.clock()
+local lastMatchIsWon = nil
+local lastMatchRewards = nil
+local lastMatchStats = nil
+local lastMatchMapId = nil
+local lastMatchStageId = nil
+local lastMatchDifficulty = nil
+local lastMatchTotalTime = nil
 local matchStartCycle = math.floor(os.time() / 1800)
 local pendingResetLeave = false
 local CheckHostLeftAndAutoLeave = nil
+local CheckAndSendMatchWebhook = nil
+local ResetMatchState = nil
+
+ResetMatchState = function(reason)
+    hasSentMatchWebhook = false
+    isMatchFinished = false
+    hasHandledLeave = false
+    pendingResetLeave = false
+    battleStartTime = os.clock()
+    lastMatchIsWon = nil
+    lastMatchRewards = nil
+    lastMatchStats = nil
+    lastMatchMapId = nil
+    lastMatchStageId = nil
+    lastMatchDifficulty = nil
+    lastMatchTotalTime = nil
+end
 
 local function IsMatchFinished()
     if isMatchFinished then
-        pcall(CheckAndSendMatchWebhook)
+        if CheckAndSendMatchWebhook then
+            pcall(CheckAndSendMatchWebhook)
+        end
         return true
     end
 
@@ -1340,7 +1369,10 @@ local function IsMatchFinished()
         local resLabel = frame:FindFirstChild("Info") and frame.Info:FindFirstChild("ResultLabel")
         local leaveBtn = frame:FindFirstChild("Buttons") and frame.Buttons:FindFirstChild("LeaveBtn")
         if (resLabel and resLabel.Visible) or (leaveBtn and leaveBtn.Visible) then
-            pcall(CheckAndSendMatchWebhook)
+            isMatchFinished = true
+            if CheckAndSendMatchWebhook then
+                pcall(CheckAndSendMatchWebhook)
+            end
             return true
         end
     end
@@ -1381,9 +1413,9 @@ end
 
 local function CheckAndExecuteAutoLeave()
     if isLobby or game.PlaceId == 117949143041402 or game.PlaceId == 110388679506690 then
-        hasHandledLeave = false
-        isMatchFinished = false
-        pendingResetLeave = false
+        if ResetMatchState then
+            ResetMatchState("Lobby Reset")
+        end
         getgenv().STRIX_IS_CHALLENGE_MATCH = false
         return
     end
@@ -1428,9 +1460,19 @@ pcall(function()
     local ge = ReplicatedStorage:WaitForChild("GameEvents", 10)
     local egEvent = ge and ge:WaitForChild("EndGameEvent", 10)
     if egEvent then
-        egEvent.OnClientEvent:Connect(function()
+        egEvent.OnClientEvent:Connect(function(isWon, mapId, stageId, totalTime, a5, a6, rewards, difficulty, stats)
             isMatchFinished = true
-            pcall(CheckAndSendMatchWebhook)
+            lastMatchIsWon = isWon
+            lastMatchMapId = mapId
+            lastMatchStageId = stageId
+            lastMatchTotalTime = totalTime
+            lastMatchRewards = rewards
+            lastMatchDifficulty = difficulty
+            lastMatchStats = stats
+
+            if CheckAndSendMatchWebhook then
+                pcall(CheckAndSendMatchWebhook)
+            end
             if (State.AutoLeaveChallenge or State.AutoLeaveOnChallengeReset) and not hasHandledLeave then
                 task.delay(1.5, function()
                     CheckAndExecuteAutoLeave()
@@ -1440,6 +1482,50 @@ pcall(function()
                 task.delay(1.5, function()
                     if CheckHostLeftAndAutoLeave then
                         pcall(CheckHostLeftAndAutoLeave)
+                    end
+                end)
+            end
+        end)
+    end
+end)
+
+-- Listen for MapLoadedComplete (New game / Retry / Next stage)
+pcall(function()
+    local ge = ReplicatedStorage:WaitForChild("GameEvents", 10)
+    local mlEvent = ge and ge:WaitForChild("MapLoadedComplete", 10)
+    if mlEvent then
+        mlEvent.OnClientEvent:Connect(function()
+            if ResetMatchState then
+                ResetMatchState("MapLoadedComplete")
+            end
+        end)
+    end
+end)
+
+-- Listen for CloseEndGameUIEvent (EndGame screen closed upon Retry / Next / Lobby)
+pcall(function()
+    local remotes = ReplicatedStorage:WaitForChild("Remotes", 10)
+    local closeEg = remotes and remotes:WaitForChild("CloseEndGameUIEvent", 10)
+    if closeEg then
+        closeEg.OnClientEvent:Connect(function()
+            if ResetMatchState then
+                ResetMatchState("CloseEndGameUIEvent")
+            end
+        end)
+    end
+end)
+
+-- Listen for EndGameFrame visibility change
+pcall(function()
+    local plGui = LocalPlayer and LocalPlayer:WaitForChild("PlayerGui", 10)
+    local eg = plGui and plGui:WaitForChild("EndGame", 10)
+    local frame = eg and eg:WaitForChild("EndGameFrame", 10)
+    if frame then
+        frame:GetPropertyChangedSignal("Visible"):Connect(function()
+            if not frame.Visible and (isMatchFinished or hasSentMatchWebhook) then
+                task.delay(1, function()
+                    if not frame.Visible and ResetMatchState then
+                        ResetMatchState("EndGameFrame Hidden")
                     end
                 end)
             end
@@ -1833,25 +1919,6 @@ end
 -- ====================================================================
 -- DISCORD WEBHOOK SYSTEM (Victory / Defeat Match Reporter)
 -- ====================================================================
-local battleStartTime = os.clock()
-local hasSentMatchWebhook = false
-local lastMatchRewards = nil
-
-pcall(function()
-    local srui = Remotes and Remotes:FindFirstChild("ShowRewardsUI")
-    if srui then
-        srui.OnClientEvent:Connect(function(rewards)
-            lastMatchRewards = rewards
-        end)
-    end
-    local srui2 = Remotes and Remotes:FindFirstChild("ShowRewardUI")
-    if srui2 then
-        srui2.OnClientEvent:Connect(function(rewards)
-            lastMatchRewards = rewards
-        end)
-    end
-end)
-
 local function SendDiscordWebhook(embedData)
     if not State.WebhookEnabled or not State.WebhookUrl or State.WebhookUrl == "" then return end
     
@@ -1885,7 +1952,7 @@ local function SendDiscordWebhook(embedData)
     end)
 end
 
-local function CheckAndSendMatchWebhook()
+CheckAndSendMatchWebhook = function()
     if hasSentMatchWebhook or not State.WebhookEnabled or not State.WebhookUrl or State.WebhookUrl == "" then
         return
     end
@@ -1897,70 +1964,193 @@ local function CheckAndSendMatchWebhook()
     end
 
     hasSentMatchWebhook = true
-    task.spawn(function()
-        task.wait(1.5) -- Wait for server rewards & statistics replication
+    lastWebhookDispatchTime = os.clock()
 
-        local resLabel = frame and frame:FindFirstChild("Info") and frame.Info:FindFirstChild("ResultLabel")
-        local resText = resLabel and resLabel.Text or ""
-        local isVictory = string.find(string.upper(resText), "VICTORY") ~= nil or string.find(string.upper(resText), "WIN") ~= nil
-        if resText == "" then
-            isVictory = true
+    task.spawn(function()
+        -- Wait dynamically for EndGameFrame to show and stats to finish tweening (intro takes ~2.5s)
+        local waitStart = os.clock()
+        while (os.clock() - waitStart) < 3.5 do
+            local currentEg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("EndGame")
+            local currentFrame = currentEg and currentEg:FindFirstChild("EndGameFrame")
+            if currentFrame and currentFrame.Visible then
+                local statsFrame = currentFrame:FindFirstChild("Stats")
+                local dmgVal = statsFrame and statsFrame:FindFirstChild("TotalDmg") and statsFrame.TotalDmg:FindFirstChild("Value")
+                if dmgVal and dmgVal.Text ~= "" and dmgVal.Text ~= "0" then
+                    task.wait(0.5) -- Allow stat animations and rewards to finish spawning
+                    break
+                end
+            end
+            task.wait(0.2)
+        end
+
+        local currentEg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("EndGame")
+        local frame = currentEg and currentEg:FindFirstChild("EndGameFrame")
+
+        -- 1. Determine Victory / Defeat with multi-layered ground truth
+        local isVictory = false
+        if lastMatchIsWon ~= nil then
+            isVictory = (lastMatchIsWon == true)
+        else
+            local resLabel = frame and frame:FindFirstChild("Info") and frame.Info:FindFirstChild("ResultLabel")
+            local headerName = frame and frame:FindFirstChild("Header") and (frame.Header:FindFirstChild("Name") or frame.Header:FindFirstChild("FrameName"))
+            local resText = resLabel and resLabel.Text or ""
+            local headerText = headerName and headerName.Text or ""
+            local upperRes = string.upper(resText)
+            local upperHeader = string.upper(headerText)
+
+            local resLabelWon = resLabel and resLabel:FindFirstChild("Won")
+            local resLabelLose = resLabel and resLabel:FindFirstChild("Lose")
+
+            if string.find(upperRes, "WON") or string.find(upperRes, "WIN") or string.find(upperRes, "VICTORY")
+                or string.find(upperHeader, "WON") or string.find(upperHeader, "WIN") or string.find(upperHeader, "VICTORY")
+                or (resLabelWon and resLabelWon.Enabled == true) then
+                isVictory = true
+            elseif string.find(upperRes, "DEFEAT") or string.find(upperRes, "LOSE")
+                or string.find(upperHeader, "DEFEAT") or string.find(upperHeader, "LOSE")
+                or (resLabelLose and resLabelLose.Enabled == true) then
+                isVictory = false
+            else
+                isVictory = not (string.find(upperRes, "DEFEAT") or string.find(upperRes, "LOSE"))
+            end
         end
 
         if isVictory and not State.WebhookOnVictory then return end
         if not isVictory and not State.WebhookOnDefeat then return end
 
-        local mapInfo = GetCurrentGameMode() or "Battle Match"
-        local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("PlayingGui")
-        local sm = pg and pg:FindFirstChild("Frame") and pg.Frame:FindFirstChild("MainContainer")
-            and pg.Frame.MainContainer:FindFirstChild("StageText")
-            and pg.Frame.MainContainer.StageText:FindFirstChild("StageMap")
-        if sm and sm.Text and sm.Text ~= "" then
-            mapInfo = sm.Text
+        -- 2. Map & Stage Resolution
+        local mapInfo = "Battle Match"
+        local mapNameLabel = frame and frame:FindFirstChild("Info") and frame.Info:FindFirstChild("MapName")
+        local stageNameLabel = frame and frame:FindFirstChild("Info") and frame.Info:FindFirstChild("StageName")
+        if mapNameLabel and mapNameLabel.Text ~= "" then
+            mapInfo = mapNameLabel.Text
+            if stageNameLabel and stageNameLabel.Text ~= "" then
+                mapInfo = mapInfo .. " " .. stageNameLabel.Text
+            end
+        else
+            local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("PlayingGui")
+            local sm = pg and pg:FindFirstChild("Frame") and pg.Frame:FindFirstChild("MainContainer")
+                and pg.Frame.MainContainer:FindFirstChild("StageText")
+                and pg.Frame.MainContainer.StageText:FindFirstChild("StageMap")
+            if sm and sm.Text and sm.Text ~= "" then
+                mapInfo = sm.Text
+            elseif lastMatchMapId then
+                mapInfo = tostring(lastMatchMapId) .. (lastMatchStageId and (" Stage: " .. tostring(lastMatchStageId)) or "")
+            else
+                mapInfo = GetCurrentGameMode() or "Battle Match"
+            end
         end
 
-        local elapsedSecs = math.max(1, math.floor(os.clock() - (battleStartTime or os.clock())))
-        local timeFormatted = string.format("%02d:%02d", math.floor(elapsedSecs / 60), elapsedSecs % 60)
+        local diffStr = lastMatchDifficulty or State.StoryDiff or ""
+        if diffStr ~= "" and not string.find(mapInfo, diffStr) then
+            mapInfo = mapInfo .. " (" .. diffStr .. ")"
+        end
 
+        -- 3. Time Elapsed Resolution
+        local totalTimeLabel = frame and frame:FindFirstChild("Stats") and frame.Stats:FindFirstChild("TotalTime")
+        local totalTimeVal = totalTimeLabel and totalTimeLabel:FindFirstChild("Value")
+        local timeFormatted = "00:00"
+        if totalTimeVal and totalTimeVal.Text ~= "" and totalTimeVal.Text ~= "00:00" then
+            timeFormatted = totalTimeVal.Text
+        elseif lastMatchTotalTime and tonumber(lastMatchTotalTime) then
+            local secs = tonumber(lastMatchTotalTime)
+            timeFormatted = string.format("%02d:%02d", math.floor(secs / 60), secs % 60)
+        else
+            local elapsedSecs = math.max(1, math.floor(os.clock() - (battleStartTime or os.clock())))
+            timeFormatted = string.format("%02d:%02d", math.floor(elapsedSecs / 60), elapsedSecs % 60)
+        end
+
+        -- 4. Stats Resolution (Damage, Mobs, EXP)
         local damageStr = "N/A"
         local mobsStr = "N/A"
         local expStr = "N/A"
-        local rewardsList = {}
 
-        if frame then
-            for _, desc in ipairs(frame:GetDescendants()) do
-                if desc:IsA("TextLabel") and desc.Visible and desc.Text and desc.Text ~= "" then
-                    local txt = desc.Text
-                    local ltxt = string.lower(txt)
-                    if string.find(ltxt, "damage") then
-                        damageStr = txt
-                    elseif string.find(ltxt, "kill") or string.find(ltxt, "mob") or string.find(ltxt, "enem") then
-                        mobsStr = txt
-                    elseif string.find(ltxt, "exp") then
-                        expStr = txt
+        local statsFrame = frame and frame:FindFirstChild("Stats")
+        if statsFrame then
+            local dmgVal = statsFrame:FindFirstChild("TotalDmg") and statsFrame.TotalDmg:FindFirstChild("Value")
+            if dmgVal and dmgVal.Text ~= "" and dmgVal.Text ~= "0" then
+                damageStr = dmgVal.Text
+            end
+
+            local killsVal = statsFrame:FindFirstChild("Takedowns") and statsFrame.Takedowns:FindFirstChild("Value")
+            if killsVal and killsVal.Text ~= "" and killsVal.Text ~= "0" then
+                mobsStr = killsVal.Text
+            end
+
+            local bpVal = statsFrame:FindFirstChild("Battlepass XP") and statsFrame["Battlepass XP"]:FindFirstChild("Value")
+            if bpVal and bpVal.Text ~= "" then
+                expStr = bpVal.Text .. " BP EXP"
+            end
+        end
+
+        if (damageStr == "N/A" or damageStr == "0") and lastMatchStats and lastMatchStats.TotalDmg then
+            damageStr = tostring(lastMatchStats.TotalDmg)
+        end
+        if (mobsStr == "N/A" or mobsStr == "0") and lastMatchStats and lastMatchStats.Takedowns then
+            mobsStr = tostring(lastMatchStats.Takedowns)
+        end
+        if (expStr == "N/A") and lastMatchStats and lastMatchStats.BattlepassExp then
+            expStr = "+" .. tostring(lastMatchStats.BattlepassExp) .. " BP EXP"
+        end
+
+        -- 5. Rewards Resolution
+        local rewardsList = {}
+        local rf = frame and frame:FindFirstChild("RewardFrame")
+        if rf then
+            for _, item in ipairs(rf:GetChildren()) do
+                if item:IsA("GuiObject") and item.Name ~= "Frame" and item.Name ~= "RewardItemTemplate" then
+                    local nameLabel = item:FindFirstChild("ItemName", true)
+                    local countLabel = item:FindFirstChild("ItemCount", true)
+                    local itemName = (nameLabel and nameLabel.Text ~= "") and nameLabel.Text or item.Name
+                    local itemCount = (countLabel and countLabel.Text ~= "") and countLabel.Text or "x1"
+                    
+                    local icon = "🎁"
+                    local lName = string.lower(itemName)
+                    if string.find(lName, "coin") then
+                        icon = "🪙"
+                    elseif string.find(lName, "gem") then
+                        icon = "💎"
+                    elseif string.find(lName, "shard") then
+                        icon = "🔮"
+                    elseif string.find(lName, "capsule") then
+                        icon = "💊"
+                    elseif string.find(lName, "trait") then
+                        icon = "📜"
+                    elseif string.find(lName, "fruit") or string.find(lName, "fish") or string.find(lName, "pan") then
+                        icon = "🍖"
                     end
+
+                    table.insert(rewardsList, icon .. " " .. itemName .. " " .. itemCount)
                 end
             end
         end
 
-        if lastMatchRewards and type(lastMatchRewards) == "table" then
+        if #rewardsList == 0 and lastMatchRewards and type(lastMatchRewards) == "table" then
             if (lastMatchRewards.Coins or 0) > 0 then
-                table.insert(rewardsList, "🪙 " .. tostring(lastMatchRewards.Coins) .. " Coins")
+                table.insert(rewardsList, "🪙 Coins x" .. tostring(lastMatchRewards.Coins))
             end
             if (lastMatchRewards.Gems or 0) > 0 then
-                table.insert(rewardsList, "💎 " .. tostring(lastMatchRewards.Gems) .. " Gems")
+                table.insert(rewardsList, "💎 Gems x" .. tostring(lastMatchRewards.Gems))
             end
             if lastMatchRewards.Items and type(lastMatchRewards.Items) == "table" then
                 for _, itm in ipairs(lastMatchRewards.Items) do
                     local itmName = itm.Id or "Item"
-                    local itmAmount = itm.Amount or 1
-                    table.insert(rewardsList, "🎁 " .. itmName .. " x" .. tostring(itmAmount))
+                    local itmAmount = itm.Count or itm.Amount or 1
+                    table.insert(rewardsList, "🎁 " .. tostring(itmName) .. " x" .. tostring(itmAmount))
+                end
+            end
+            if lastMatchRewards.Units and type(lastMatchRewards.Units) == "table" then
+                for _, u in ipairs(lastMatchRewards.Units) do
+                    local uName = u.Id or "Unit"
+                    local uCount = u.Count or 1
+                    local shiny = u.IsShiny and " ✨(Shiny)" or ""
+                    table.insert(rewardsList, "⭐ " .. tostring(uName) .. shiny .. " x" .. tostring(uCount))
                 end
             end
         end
 
         local rewardsStr = #rewardsList > 0 and table.concat(rewardsList, "\n") or "None / Standard Drop"
 
+        -- 6. Discord Embed Construction
         local embed = {
             title = isVictory and "🏆 Match Completed - VICTORY!" or "💀 Match Over - DEFEAT",
             color = isVictory and 3066993 or 15158332,
@@ -5342,8 +5532,19 @@ task.spawn(function()
             end
         else
             -- Battle-only operations (In Gameplay)
-            if State.WebhookEnabled then
+            if State.WebhookEnabled and CheckAndSendMatchWebhook then
                 pcall(CheckAndSendMatchWebhook)
+            end
+
+            -- Match State Auto-Reset for repetitive rounds (Auto Retry / Next Stage / Next Match)
+            if (hasSentMatchWebhook or isMatchFinished) and (os.clock() - lastWebhookDispatchTime > 12) then
+                local eg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("EndGame")
+                local frame = eg and eg:FindFirstChild("EndGameFrame")
+                if not (frame and frame.Visible) then
+                    if ResetMatchState then
+                        ResetMatchState("Round Transition Active")
+                    end
+                end
             end
 
             if State.AutoSolveFateSword and workspace:GetAttribute("SwordEventActive") == true then
