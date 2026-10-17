@@ -316,6 +316,73 @@ local replTween = [[local function Tween(instance, tweeninfo, propertytable)
 end]]
 rawMaclibSource = rawMaclibSource:gsub(patTween, replTween)
 
+-- Patch 6: Scrollable Dropdown Frame with smooth scrollbar, Header Clipping Offset & MaxHeight
+rawMaclibSource = rawMaclibSource:gsub(
+    'local dropdownFrame = Instance%.new%("Frame"%)%s*dropdownFrame%.Name = "DropdownFrame"',
+    [[local dropdownFrame = Instance.new("ScrollingFrame")
+					dropdownFrame.Name = "DropdownFrame"
+					dropdownFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+					dropdownFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+					dropdownFrame.ScrollBarThickness = 3
+					dropdownFrame.ScrollBarImageTransparency = 0.3
+					dropdownFrame.ScrollingDirection = Enum.ScrollingDirection.Y
+					dropdownFrame.ElasticBehavior = Enum.ElasticBehavior.Never
+					dropdownFrame.Active = true]]
+)
+rawMaclibSource = rawMaclibSource:gsub(
+    'dropdownFrame%.AutomaticSize = Enum%.AutomaticSize%.Y',
+    'dropdownFrame.AutomaticSize = Enum.AutomaticSize.None'
+)
+rawMaclibSource = rawMaclibSource:gsub(
+    'dropdownFrame%.Size = UDim2%.fromScale%(1, 1%)',
+    'dropdownFrame.Position = UDim2.new(0, 0, 0, 38)\n\t\t\t\t\tdropdownFrame.Size = UDim2.new(1, 0, 1, -38)'
+)
+rawMaclibSource = rawMaclibSource:gsub(
+    'dropdownFrameUIPadding%.PaddingTop = UDim%.new%(0, 38%)',
+    'dropdownFrameUIPadding.PaddingTop = UDim.new(0, 4)'
+)
+rawMaclibSource = rawMaclibSource:gsub(
+    'return totalHeight %+ spacing %+ padding',
+    'local fullHeight = 38 + totalHeight + spacing + padding\n\t\t\t\t\t\treturn math.min(fullHeight, Settings.MaxHeight or 240)'
+)
+
+-- Patch 7: Dropdown MouseWheel Smooth Scrolling over Option Buttons
+rawMaclibSource = rawMaclibSource:gsub(
+    'searchBox:GetPropertyChangedSignal%("Text"%):Connect%(findOption%)',
+    [[searchBox:GetPropertyChangedSignal("Text"):Connect(findOption)
+					UserInputService.InputChanged:Connect(function(input)
+						if input.UserInputType == Enum.UserInputType.MouseWheel and dropped and dropdownFrame.Visible then
+							local mousePos = UserInputService:GetMouseLocation()
+							local dPos = dropdown.AbsolutePosition
+							local dSize = dropdown.AbsoluteSize
+							if mousePos.X >= dPos.X and mousePos.X <= dPos.X + dSize.X and mousePos.Y >= dPos.Y and mousePos.Y <= dPos.Y + dSize.Y then
+								local delta = -input.Position.Z * 35
+								local maxCanvas = math.max(0, dropdownFrame.AbsoluteCanvasSize.Y - dropdownFrame.AbsoluteWindowSize.Y)
+								dropdownFrame.CanvasPosition = Vector2.new(0, math.clamp(dropdownFrame.CanvasPosition.Y + delta, 0, maxCanvas))
+							end
+						end
+					end)]]
+)
+
+-- Patch 8: ElementsScrolling ScrollBar & Universal MouseWheel Handling
+rawMaclibSource = rawMaclibSource:gsub(
+    'elementsScrolling%.ScrollBarThickness = 1',
+    [[elementsScrolling.ScrollBarThickness = 3
+			elementsScrolling.Active = true
+			UserInputService.InputChanged:Connect(function(input)
+				if input.UserInputType == Enum.UserInputType.MouseWheel and elementsScrolling.Visible then
+					local mousePos = UserInputService:GetMouseLocation()
+					local sPos = elementsScrolling.AbsolutePosition
+					local sSize = elementsScrolling.AbsoluteSize
+					if mousePos.X >= sPos.X and mousePos.X <= sPos.X + sSize.X and mousePos.Y >= sPos.Y and mousePos.Y <= sPos.Y + sSize.Y then
+						local delta = -input.Position.Z * 45
+						local maxCanvas = math.max(0, elementsScrolling.AbsoluteCanvasSize.Y - elementsScrolling.AbsoluteWindowSize.Y)
+						elementsScrolling.CanvasPosition = Vector2.new(0, math.clamp(elementsScrolling.CanvasPosition.Y + delta, 0, maxCanvas))
+					end
+				end
+			end)]]
+)
+
 MacLib = loadstring(rawMaclibSource)()
 _G.MacLib = MacLib
 
@@ -4742,6 +4809,7 @@ WebhookSections.Outcomes:Toggle({
 -- ====================================================================
 local SummonShopSections = {
     Summon = Tabs.SummonShop:Section({ Side = "Left" }),
+    ShopAutomation = Tabs.SummonShop:Section({ Side = "Left" }),
     GemsShop = Tabs.SummonShop:Section({ Side = "Right" }),
     GoldShop = Tabs.SummonShop:Section({ Side = "Right" })
 }
@@ -4782,6 +4850,18 @@ SummonShopSections.Summon:Dropdown({
     end
 }, "Dropdown_SummonAmount")
 
+-- [Menu] Shop Automation
+SummonShopSections.ShopAutomation:Header({ Text = "Shop Automation" })
+
+SummonShopSections.ShopAutomation:Toggle({
+    Name = "Auto Leave on Shop Restock",
+    Default = (State.AutoLeaveOnShopReset ~= false),
+    Callback = function(val)
+        State.AutoLeaveOnShopReset = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_AutoLeaveOnShopReset")
+
 -- [Menu] Gems Shop
 SummonShopSections.GemsShop:Header({ Text = "Gems Shop" })
 
@@ -4793,15 +4873,6 @@ SummonShopSections.GemsShop:Toggle({
         SaveConfigDebounced()
     end
 }, "Toggle_AutoBuyGems")
-
-SummonShopSections.GemsShop:Toggle({
-    Name = "Auto Leave on Shop Restock",
-    Default = (State.AutoLeaveOnShopReset ~= false),
-    Callback = function(val)
-        State.AutoLeaveOnShopReset = val
-        SaveConfigDebounced()
-    end
-}, "Toggle_AutoLeaveOnShopReset")
 
 local initialGemsLabels = {}
 if type(State.SelectedGemsItems) == "table" then
@@ -4819,6 +4890,7 @@ SummonShopSections.GemsShop:Dropdown({
     Name = "Select Items",
     Multi = true,
     Required = false,
+    Search = true,
     Options = GameData.GemsItems,
     Default = initialGemsLabels,
     Callback = function(val)
@@ -4867,6 +4939,7 @@ SummonShopSections.GoldShop:Dropdown({
     Name = "Select Items",
     Multi = true,
     Required = false,
+    Search = true,
     Options = GameData.GoldItems,
     Default = initialGoldLabels,
     Callback = function(val)
