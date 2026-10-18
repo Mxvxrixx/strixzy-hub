@@ -236,6 +236,57 @@ local patUpdateSel = "function DropdownFunctions:UpdateSelection%(newSelection%)
 local replUpdateSel = "function DropdownFunctions:UpdateSelection(newSelection)\n\t\t\t\t\t\tif type(newSelection) == 'string' then newSelection = { newSelection } end"
 rawMaclibSource = rawMaclibSource:gsub(patUpdateSel, replUpdateSel)
 
+-- Patch 2.6: Enable Smooth Scrolling on Dropdowns (Fix: Dropdown unable to scroll up/down when options exceed height)
+local patDropdownFrame = 'local dropdownFrame = Instance%.new%("Frame"%)\r?\n\t*dropdownFrame%.Name = "DropdownFrame"\r?\n\t*dropdownFrame%.BackgroundColor3 = Color3%.fromRGB%(255, 255, 255%)\r?\n\t*dropdownFrame%.BackgroundTransparency = 1\r?\n\t*dropdownFrame%.BorderColor3 = Color3%.fromRGB%(0, 0, 0%)\r?\n\t*dropdownFrame%.BorderSizePixel = 0\r?\n\t*dropdownFrame%.ClipsDescendants = true\r?\n\t*dropdownFrame%.Size = UDim2%.fromScale%(1, 1%)\r?\n\t*dropdownFrame%.Visible = false\r?\n\t*dropdownFrame%.AutomaticSize = Enum%.AutomaticSize%.Y'
+local replDropdownFrame = [[local dropdownFrame = Instance.new("ScrollingFrame")
+					dropdownFrame.Name = "DropdownFrame"
+					dropdownFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+					dropdownFrame.BackgroundTransparency = 1
+					dropdownFrame.BorderColor3 = Color3.fromRGB(0, 0, 0)
+					dropdownFrame.BorderSizePixel = 0
+					dropdownFrame.ClipsDescendants = true
+					dropdownFrame.Position = UDim2.new(0, 0, 0, 38)
+					dropdownFrame.Size = UDim2.new(1, 0, 1, -38)
+					dropdownFrame.ScrollBarThickness = 3
+					dropdownFrame.ScrollBarImageColor3 = Color3.fromRGB(160, 160, 175)
+					dropdownFrame.ScrollBarImageTransparency = 0.4
+					dropdownFrame.ScrollingDirection = Enum.ScrollingDirection.Y
+					dropdownFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+					dropdownFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+					dropdownFrame.ElasticBehavior = Enum.ElasticBehavior.WhenScrollable
+					dropdownFrame.Visible = false]]
+rawMaclibSource = rawMaclibSource:gsub(patDropdownFrame, replDropdownFrame)
+
+local patDropdownPad = 'dropdownFrameUIPadding%.PaddingTop = UDim%.new%(0, 38%)\r?\n\t*dropdownFrameUIPadding%.PaddingBottom = UDim%.new%(0, 10%)'
+local replDropdownPad = 'dropdownFrameUIPadding.PaddingTop = UDim.new(0, 4)\n\t\t\t\t\tdropdownFrameUIPadding.PaddingBottom = UDim.new(0, 8)\n\t\t\t\t\tdropdownFrameUIPadding.PaddingRight = UDim.new(0, 5)'
+rawMaclibSource = rawMaclibSource:gsub(patDropdownPad, replDropdownPad)
+
+local patCalcSize = 'local function CalculateDropdownSize%(%)\r?\n\t*local totalHeight = 0\r?\n\t*local visibleChildrenCount = 0\r?\n\t*local padding = dropdownFrameUIPadding%.PaddingTop%.Offset %+ dropdownFrameUIPadding%.PaddingBottom%.Offset\r?\n\r?\n\t*for _, v in pairs%(dropdownFrame:GetChildren%(%)%) do\r?\n\t*if not v:IsA%("UIComponent"%) and v%.Visible then\r?\n\t*totalHeight %+= v%.AbsoluteSize%.Y\r?\n\t*visibleChildrenCount %+= 1\r?\n\t*end\r?\n\t*end\r?\n\r?\n\t*local spacing = dropdownFrameUIListLayout%.Padding%.Offset %* %(visibleChildrenCount %- 1%)\r?\n\r?\n\t*return totalHeight %+ spacing %+ padding\r?\n\t*end'
+local replCalcSize = [[local function CalculateDropdownSize()
+						local totalHeight = 0
+						local visibleChildrenCount = 0
+						local padding = dropdownFrameUIPadding.PaddingTop.Offset + dropdownFrameUIPadding.PaddingBottom.Offset
+
+						for _, v in pairs(dropdownFrame:GetChildren()) do
+							if not v:IsA("UIComponent") and v.Visible then
+								totalHeight += v.AbsoluteSize.Y
+								visibleChildrenCount += 1
+							end
+						end
+
+						local spacing = dropdownFrameUIListLayout.Padding.Offset * math.max(0, visibleChildrenCount - 1)
+						local contentHeight = totalHeight + spacing + padding
+						local fullDropdownHeight = 38 + contentHeight
+						local maxDropdownHeight = 210
+
+						if dropdownFrame:IsA("ScrollingFrame") then
+							dropdownFrame.ScrollBarThickness = (fullDropdownHeight > maxDropdownHeight) and 3 or 0
+						end
+
+						return math.min(fullDropdownHeight, maxDropdownHeight)
+					end]]
+rawMaclibSource = rawMaclibSource:gsub(patCalcSize, replCalcSize)
+
 -- Patch 2.8: Slider Min/Max Arithmetic Nil Bug
 local patSliderMinMax = "function SectionFunctions:Slider%(Settings, Flag%)"
 local replSliderMinMax = "function SectionFunctions:Slider(Settings, Flag)\n\t\t\t\t\tSettings.Minimum = Settings.Minimum or Settings.Min or 0\n\t\t\t\t\tSettings.Maximum = Settings.Maximum or Settings.Max or 100"
