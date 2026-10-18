@@ -402,33 +402,94 @@ for _, mapInfo in pairs(MapConfig) do
 end
 end
 
--- Populate Shop items dynamically from ShopConfig & ItemDatabase (with built-in fallback for Battle place)
+-- Populate Shop items dynamically from ShopConfig & ItemDatabase (with disk cache & accurate fallback for Battle place)
+local ShopConfigCacheFile = "STRIX HUB/Anime Mysterious/shop_config_cache.json"
+local cachedItemNames = {}
+
+-- Cache ShopConfig and ItemNames to disk when in Lobby (for instant access across Battle places)
+if isLobby and ShopConfig and ShopConfig.GoldShopItems and #ShopConfig.GoldShopItems > 0 then
+    task.spawn(function()
+        pcall(function()
+            local itemNames = {}
+            for _, item in ipairs(ShopConfig.GoldShopItems) do
+                if item and item.ID and ItemDatabase and ItemDatabase.GetItem then
+                    local ok, db = pcall(function() return ItemDatabase.GetItem(item.ID) end)
+                    if ok and db and db.Name then
+                        itemNames[item.ID] = db.Name
+                    end
+                end
+            end
+            for _, item in ipairs(ShopConfig.GemsShopItems or {}) do
+                if item and item.ID and ItemDatabase and ItemDatabase.GetItem and not itemNames[item.ID] then
+                    local ok, db = pcall(function() return ItemDatabase.GetItem(item.ID) end)
+                    if ok and db and db.Name then
+                        itemNames[item.ID] = db.Name
+                    end
+                end
+            end
+            local payload = {
+                GoldShopItems = ShopConfig.GoldShopItems,
+                GemsShopItems = ShopConfig.GemsShopItems,
+                ItemNames = itemNames
+            }
+            if writefile then
+                EnsureFolders()
+                writefile(ShopConfigCacheFile, HttpService:JSONEncode(payload))
+            end
+        end)
+    end)
+elseif not isLobby then
+    -- When in Battle place: attempt to load verified ShopConfig from disk cache
+    pcall(function()
+        if isfile and isfile(ShopConfigCacheFile) then
+            local raw = readfile(ShopConfigCacheFile)
+            if raw and #raw > 10 then
+                local data = HttpService:JSONDecode(raw)
+                if type(data) == "table" then
+                    if data.GoldShopItems and #data.GoldShopItems > 0 and data.GemsShopItems and #data.GemsShopItems > 0 then
+                        ShopConfig = {
+                            GoldShopItems = data.GoldShopItems,
+                            GemsShopItems = data.GemsShopItems
+                        }
+                    end
+                    if type(data.ItemNames) == "table" then
+                        cachedItemNames = data.ItemNames
+                    end
+                end
+            end
+        end
+    end)
+end
+
+-- Fallback tables with exact 12 items, actual stock, and real prices verified from current game version
 local defaultGemsShop = {
     { ID = "Fruit_1", Price = 10, MaxStock = 10 },
     { ID = "Fruit_2", Price = 25, MaxStock = 5 },
-    { ID = "RareShard", Price = 35, MaxStock = 10 },
-    { ID = "EpicShard", Price = 75, MaxStock = 7 },
-    { ID = "LegendShard", Price = 180, MaxStock = 5 },
-    { ID = "MythicShard", Price = 350, MaxStock = 3 },
-    { ID = "MysteriousShard", Price = 10000, MaxStock = 1 },
-    { ID = "Trait", Price = 200, MaxStock = 3 },
+    { ID = "RareShard", Price = 35, MaxStock = 25 },
+    { ID = "EpicShard", Price = 75, MaxStock = 20 },
+    { ID = "LegendShard", Price = 180, MaxStock = 20 },
+    { ID = "MythicShard", Price = 350, MaxStock = 20 },
+    { ID = "MysteriousShard", Price = 10000, MaxStock = 10 },
+    { ID = "Trait", Price = 200, MaxStock = 10 },
     { ID = "StatRerollAll", Price = 35, MaxStock = 10 },
     { ID = "StatReroll", Price = 80, MaxStock = 10 },
     { ID = "MysteryCapsule", Price = 750, MaxStock = 50 },
+    { ID = "BingoCoin", Price = 1000, MaxStock = 10 },
 }
 
 local defaultGoldShop = {
-    { ID = "Fruit_1", Price = 1000, MaxStock = 10 },
-    { ID = "Fruit_2", Price = 2500, MaxStock = 5 },
-    { ID = "RareShard", Price = 3500, MaxStock = 10 },
-    { ID = "EpicShard", Price = 7500, MaxStock = 7 },
-    { ID = "LegendShard", Price = 18000, MaxStock = 5 },
-    { ID = "MythicShard", Price = 35000, MaxStock = 3 },
-    { ID = "MysteriousShard", Price = 1000000, MaxStock = 1 },
-    { ID = "Trait", Price = 20000, MaxStock = 3 },
-    { ID = "StatRerollAll", Price = 3500, MaxStock = 10 },
-    { ID = "StatReroll", Price = 8000, MaxStock = 10 },
-    { ID = "MysteryCapsule", Price = 75000, MaxStock = 50 },
+    { ID = "Fruit_1", Price = 150, MaxStock = 10 },
+    { ID = "Fruit_2", Price = 350, MaxStock = 5 },
+    { ID = "RareShard", Price = 500, MaxStock = 25 },
+    { ID = "EpicShard", Price = 1000, MaxStock = 20 },
+    { ID = "LegendShard", Price = 2500, MaxStock = 20 },
+    { ID = "MythicShard", Price = 5000, MaxStock = 20 },
+    { ID = "MysteriousShard", Price = 65000, MaxStock = 10 },
+    { ID = "Trait", Price = 3000, MaxStock = 10 },
+    { ID = "StatRerollAll", Price = 500, MaxStock = 10 },
+    { ID = "StatReroll", Price = 1200, MaxStock = 10 },
+    { ID = "MysteryCapsule", Price = 3000, MaxStock = 50 },
+    { ID = "BingoCoin", Price = 2000, MaxStock = 10 },
 }
 
 local gemsItemsToProcess = (ShopConfig and ShopConfig.GemsShopItems and #ShopConfig.GemsShopItems > 0) and ShopConfig.GemsShopItems or defaultGemsShop
@@ -438,6 +499,9 @@ local function ResolveItemName(id)
     if ItemDatabase and ItemDatabase.GetItem then
         local ok, db = pcall(function() return ItemDatabase.GetItem(id) end)
         if ok and db and db.Name then return db.Name end
+    end
+    if cachedItemNames and cachedItemNames[id] then
+        return cachedItemNames[id]
     end
     local fallbackNames = {
         Fruit_1 = "Namekian Fruit",
@@ -450,7 +514,8 @@ local function ResolveItemName(id)
         Trait = "Trait",
         StatRerollAll = "StatsRerollAll",
         StatReroll = "StatsReroll",
-        MysteryCapsule = "Release Capsule"
+        MysteryCapsule = "Release Capsule",
+        BingoCoin = "Bingo Coin"
     }
     return fallbackNames[id] or id
 end
@@ -5778,19 +5843,38 @@ LoadConfig = function()
             end
             pcall(function() MacLib.Options["Dropdown_TargetChallenges"]:UpdateSelection(selected) end)
         end
+        local function MatchDropdownLabel(idOrLabel, idToLabelMap, itemMap)
+            if not idOrLabel then return nil end
+            if idToLabelMap[idOrLabel] then return idToLabelMap[idOrLabel] end
+            if itemMap[idOrLabel] then return idOrLabel end
+            local baseName = string.match(tostring(idOrLabel), "^(.-)%s*%(") or tostring(idOrLabel)
+            baseName = string.gsub(baseName, "^%s*(.-)%s*$", "%1")
+            for label, itemData in pairs(itemMap) do
+                if itemData.ID == idOrLabel or itemData.Name == baseName or itemData.ID == baseName then
+                    return label
+                end
+            end
+            return nil
+        end
+
         if data.AutoBuyGems ~= nil and MacLib.Options["Toggle_AutoBuyGems"] then
             pcall(function() MacLib.Options["Toggle_AutoBuyGems"]:UpdateState(data.AutoBuyGems) end)
         end
         if data.SelectedGemsItems and MacLib.Options["Dropdown_GemsItems"] then
             local labelsToSelect = {}
-            State.SelectedGemsItems = data.SelectedGemsItems or {}
+            State.SelectedGemsItems = {}
             if type(data.SelectedGemsItems) == "table" then
                 for _, idOrLabel in ipairs(data.SelectedGemsItems) do
-                    local lbl = GameData.GemsIdToLabel[idOrLabel]
+                    local lbl = MatchDropdownLabel(idOrLabel, GameData.GemsIdToLabel, GameData.GemsItemMap)
                     if lbl then
-                        table.insert(labelsToSelect, lbl)
-                    elseif GameData.GemsItemMap[idOrLabel] then
-                        table.insert(labelsToSelect, idOrLabel)
+                        local itemData = GameData.GemsItemMap[lbl]
+                        local id = itemData and itemData.ID or idOrLabel
+                        if not table.find(State.SelectedGemsItems, id) then
+                            table.insert(State.SelectedGemsItems, id)
+                        end
+                        if not table.find(labelsToSelect, lbl) then
+                            table.insert(labelsToSelect, lbl)
+                        end
                     end
                 end
             end
@@ -5801,14 +5885,19 @@ LoadConfig = function()
         end
         if data.SelectedGoldItems and MacLib.Options["Dropdown_GoldItems"] then
             local labelsToSelect = {}
-            State.SelectedGoldItems = data.SelectedGoldItems or {}
+            State.SelectedGoldItems = {}
             if type(data.SelectedGoldItems) == "table" then
                 for _, idOrLabel in ipairs(data.SelectedGoldItems) do
-                    local lbl = GameData.GoldIdToLabel[idOrLabel]
+                    local lbl = MatchDropdownLabel(idOrLabel, GameData.GoldIdToLabel, GameData.GoldItemMap)
                     if lbl then
-                        table.insert(labelsToSelect, lbl)
-                    elseif GameData.GoldItemMap[idOrLabel] then
-                        table.insert(labelsToSelect, idOrLabel)
+                        local itemData = GameData.GoldItemMap[lbl]
+                        local id = itemData and itemData.ID or idOrLabel
+                        if not table.find(State.SelectedGoldItems, id) then
+                            table.insert(State.SelectedGoldItems, id)
+                        end
+                        if not table.find(labelsToSelect, lbl) then
+                            table.insert(labelsToSelect, lbl)
+                        end
                     end
                 end
             end
