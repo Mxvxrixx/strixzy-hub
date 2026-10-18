@@ -1450,6 +1450,7 @@ local lastMatchStageId = nil
 local lastMatchDifficulty = nil
 local lastMatchTotalTime = nil
 local lastMatchHudTimer = nil
+local lastMatchHudStageMap = nil
 local matchStartCycle = math.floor(os.time() / 1800)
 local pendingResetLeave = false
 local CheckHostLeftAndAutoLeave = nil
@@ -1470,6 +1471,7 @@ ResetMatchState = function(reason)
     lastMatchDifficulty = nil
     lastMatchTotalTime = nil
     lastMatchHudTimer = nil
+    lastMatchHudStageMap = nil
 end
 
 local function IsMatchFinished()
@@ -1591,11 +1593,17 @@ task.spawn(function()
                 lastMatchDifficulty = difficulty
                 lastMatchStats = stats
 
-                -- Capture battle timer from PlayingGui HUD as secondary backup
+                -- Capture battle timer and stage map from PlayingGui HUD
                 local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("PlayingGui")
                 local tt = pg and pg:FindFirstChild("Frame") and pg.Frame:FindFirstChild("HealthBar") and pg.Frame.HealthBar:FindFirstChild("TimerText")
                 if tt and tt.Text and tt.Text ~= "" then
                     lastMatchHudTimer = string.match(tt.Text, "(%d+:%d+)")
+                end
+                local sm = pg and pg:FindFirstChild("Frame") and pg.Frame:FindFirstChild("MainContainer")
+                    and pg.Frame.MainContainer:FindFirstChild("StageText")
+                    and pg.Frame.MainContainer.StageText:FindFirstChild("StageMap")
+                if sm and sm.Text and sm.Text ~= "" then
+                    lastMatchHudStageMap = sm.Text
                 end
 
                 if CheckAndSendMatchWebhook then
@@ -2037,6 +2045,70 @@ local function GetReplicaData()
     return nil
 end
 
+local function FormatNumberCommas(n)
+    local s = tostring(math.floor(tonumber(n) or 0))
+    local k
+    while true do
+        s, k = string.gsub(s, "^(-?%d+)(%d%d%d)", "%1,%2")
+        if k == 0 then break end
+    end
+    return s
+end
+
+local function ResolveRewardDisplayName(rawId)
+    local ItemDB = select(2, pcall(require, ReplicatedStorage.Modules.ItemDatabase))
+    if ItemDB and ItemDB.GetItem then
+        local ok, dbItem = pcall(function() return ItemDB.GetItem(rawId) end)
+        if ok and dbItem and dbItem.Name then
+            return dbItem.Name
+        end
+    end
+    if rawId == "HalloweenCoin" then return "Halloween Coins" end
+    if rawId == "Coins" or rawId == "Coin" then return "Coins" end
+    if rawId == "Gems" or rawId == "Gem" then return "Gems" end
+    return rawId
+end
+
+local function GetPlayerTotalItemCount(displayName, rawId)
+    local repData = GetReplicaData()
+    local inv = (repData and type(repData.ItemInventory) == "table") and repData.ItemInventory or {}
+
+    local function Clean(s)
+        return string.lower(string.gsub(tostring(s or ""), "[%s_]+", ""))
+    end
+
+    local cName = Clean(displayName)
+    local cId = Clean(rawId)
+
+    if cName == "coins" or cName == "coin" or cId == "coins" or cId == "coin" then
+        local c = (repData and repData.Coins) or LocalPlayer:GetAttribute("Coins") or 0
+        return tonumber(c) or 0
+    end
+    if cName == "gems" or cName == "gem" or cId == "gems" or cId == "gem" then
+        local g = (repData and repData.Gems) or LocalPlayer:GetAttribute("Gems") or 0
+        return tonumber(g) or 0
+    end
+
+    if rawId and inv[rawId] ~= nil then return tonumber(inv[rawId]) or 0 end
+    if displayName and inv[displayName] ~= nil then return tonumber(inv[displayName]) or 0 end
+
+    for k, v in pairs(inv) do
+        local cK = Clean(k)
+        if cK == cName or cK == cId or cK .. "s" == cName or cK == cName .. "s" or cK .. "s" == cId or cK == cId .. "s" then
+            return tonumber(v) or 0
+        end
+        local ItemDB = select(2, pcall(require, ReplicatedStorage.Modules.ItemDatabase))
+        local dbItem = ItemDB and ItemDB.GetItem and select(2, pcall(function() return ItemDB.GetItem(k) end))
+        if dbItem and dbItem.Name then
+            local cDb = Clean(dbItem.Name)
+            if cDb == cName or cDb == cId or cDb .. "s" == cName or cDb == cName .. "s" then
+                return tonumber(v) or 0
+            end
+        end
+    end
+    return nil
+end
+
 -- ====================================================================
 -- DISCORD WEBHOOK SYSTEM (Victory / Defeat Match Reporter)
 -- ====================================================================
@@ -2143,30 +2215,53 @@ CheckAndSendMatchWebhook = function()
         if not isVictory and not State.WebhookOnDefeat then return end
 
         -- 2. Map & Stage Resolution
-        local mapInfo = "Battle Match"
-        local mapNameLabel = frame and frame:FindFirstChild("Info") and frame.Info:FindFirstChild("MapName")
-        local stageNameLabel = frame and frame:FindFirstChild("Info") and frame.Info:FindFirstChild("StageName")
-        if mapNameLabel and mapNameLabel.Text ~= "" then
-            mapInfo = mapNameLabel.Text
-            if stageNameLabel and stageNameLabel.Text ~= "" then
-                mapInfo = mapInfo .. " " .. stageNameLabel.Text
-            end
-        else
+        local mapInfo = nil
+
+        -- Priority 1: Captured HUD text from PlayingGui during active match (100% accurate, avoids EndGame Studio template defaults)
+        if lastMatchHudStageMap and lastMatchHudStageMap ~= "" then
+            mapInfo = lastMatchHudStageMap
+        end
+
+        -- Priority 2: In-game HUD if PlayingGui is still active
+        if not mapInfo then
             local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("PlayingGui")
             local sm = pg and pg:FindFirstChild("Frame") and pg.Frame:FindFirstChild("MainContainer")
                 and pg.Frame.MainContainer:FindFirstChild("StageText")
                 and pg.Frame.MainContainer.StageText:FindFirstChild("StageMap")
             if sm and sm.Text and sm.Text ~= "" then
                 mapInfo = sm.Text
-            elseif lastMatchMapId then
-                mapInfo = tostring(lastMatchMapId) .. (lastMatchStageId and (" Stage: " .. tostring(lastMatchStageId)) or "")
-            else
-                mapInfo = GetCurrentGameMode() or "Battle Match"
             end
         end
 
+        -- Priority 3: Authoritative MapConfig from server event mapId
+        if not mapInfo and lastMatchMapId then
+            local MapConfig = select(2, pcall(require, ReplicatedStorage.Modules.Gameplay.MapConfig))
+            local mapData = MapConfig and MapConfig.getData and select(2, pcall(function() return MapConfig.getData(lastMatchMapId) end))
+            local mapName = mapData and mapData.Name or tostring(lastMatchMapId)
+            local stageStr = lastMatchStageId and (" Stage: " .. tostring(lastMatchStageId)) or ""
+            mapInfo = mapName .. (stageStr ~= "" and (" " .. stageStr) or "")
+        end
+
+        -- Priority 4: EndGame UI labels
+        if not mapInfo then
+            local mapNameLabel = frame and frame:FindFirstChild("Info") and frame.Info:FindFirstChild("MapName")
+            local stageNameLabel = frame and frame:FindFirstChild("Info") and frame.Info:FindFirstChild("StageName")
+            local mText = mapNameLabel and mapNameLabel.Text or ""
+            local sText = stageNameLabel and stageNameLabel.Text or ""
+            if mText ~= "" then
+                mapInfo = mText .. (sText ~= "" and (" " .. sText) or "")
+            end
+        end
+
+        if not mapInfo or mapInfo == "" then
+            mapInfo = GetCurrentGameMode() or "Battle Match"
+        end
+
+        mapInfo = string.gsub(mapInfo, "%s+", " ")
+        mapInfo = string.gsub(mapInfo, "^%s*(.-)%s*$", "%1")
+
         local diffStr = lastMatchDifficulty or State.StoryDiff or ""
-        if diffStr ~= "" and not string.find(mapInfo, diffStr) then
+        if diffStr ~= "" and not string.find(string.lower(mapInfo), string.lower(diffStr)) then
             mapInfo = mapInfo .. " (" .. diffStr .. ")"
         end
 
@@ -2237,7 +2332,7 @@ CheckAndSendMatchWebhook = function()
             end
         end
 
-        -- 5. Rewards Resolution
+        -- 5. Rewards Resolution (Clean: No icons, total held amount in parentheses with commas)
         local rewardsList = {}
         local rf = frame and frame:FindFirstChild("RewardFrame")
         if rf then
@@ -2245,50 +2340,58 @@ CheckAndSendMatchWebhook = function()
                 if item:IsA("GuiObject") and item.Name ~= "Frame" and item.Name ~= "RewardItemTemplate" then
                     local nameLabel = item:FindFirstChild("ItemName", true)
                     local countLabel = item:FindFirstChild("ItemCount", true)
-                    local itemName = (nameLabel and nameLabel.Text ~= "") and nameLabel.Text or item.Name
-                    local itemCount = (countLabel and countLabel.Text ~= "") and countLabel.Text or "x1"
-                    
-                    local icon = "🎁"
-                    local lName = string.lower(itemName)
-                    if string.find(lName, "coin") then
-                        icon = "🪙"
-                    elseif string.find(lName, "gem") then
-                        icon = "💎"
-                    elseif string.find(lName, "shard") then
-                        icon = "🔮"
-                    elseif string.find(lName, "capsule") then
-                        icon = "💊"
-                    elseif string.find(lName, "trait") then
-                        icon = "📜"
-                    elseif string.find(lName, "fruit") or string.find(lName, "fish") or string.find(lName, "pan") then
-                        icon = "🍖"
-                    end
+                    local rawName = (nameLabel and nameLabel.Text ~= "") and nameLabel.Text or item.Name
+                    local itemName = ResolveRewardDisplayName(rawName)
+                    local countRaw = (countLabel and countLabel.Text ~= "") and countLabel.Text or "x1"
+                    local numOnly = string.match(countRaw, "%d+")
+                    local countStr = numOnly and ("x" .. numOnly) or (string.find(countRaw, "^[xX]") and countRaw or ("x" .. countRaw))
 
-                    table.insert(rewardsList, icon .. " " .. itemName .. " " .. itemCount)
+                    local total = GetPlayerTotalItemCount(itemName, item.Name)
+                    local line = itemName .. " " .. countStr
+                    if total ~= nil then
+                        line = line .. " (" .. FormatNumberCommas(total) .. ")"
+                    end
+                    table.insert(rewardsList, line)
                 end
             end
         end
 
         if #rewardsList == 0 and lastMatchRewards and type(lastMatchRewards) == "table" then
             if (lastMatchRewards.Coins or 0) > 0 then
-                table.insert(rewardsList, "🪙 Coins x" .. tostring(lastMatchRewards.Coins))
+                local total = GetPlayerTotalItemCount("Coins", "Coins")
+                local line = "Coins x" .. tostring(lastMatchRewards.Coins)
+                if total ~= nil then
+                    line = line .. " (" .. FormatNumberCommas(total) .. ")"
+                end
+                table.insert(rewardsList, line)
             end
             if (lastMatchRewards.Gems or 0) > 0 then
-                table.insert(rewardsList, "💎 Gems x" .. tostring(lastMatchRewards.Gems))
+                local total = GetPlayerTotalItemCount("Gems", "Gems")
+                local line = "Gems x" .. tostring(lastMatchRewards.Gems)
+                if total ~= nil then
+                    line = line .. " (" .. FormatNumberCommas(total) .. ")"
+                end
+                table.insert(rewardsList, line)
             end
             if lastMatchRewards.Items and type(lastMatchRewards.Items) == "table" then
                 for _, itm in ipairs(lastMatchRewards.Items) do
-                    local itmName = itm.Id or "Item"
+                    local rawId = itm.Id or "Item"
+                    local itemName = ResolveRewardDisplayName(rawId)
                     local itmAmount = itm.Count or itm.Amount or 1
-                    table.insert(rewardsList, "🎁 " .. tostring(itmName) .. " x" .. tostring(itmAmount))
+                    local total = GetPlayerTotalItemCount(itemName, rawId)
+                    local line = itemName .. " x" .. tostring(itmAmount)
+                    if total ~= nil then
+                        line = line .. " (" .. FormatNumberCommas(total) .. ")"
+                    end
+                    table.insert(rewardsList, line)
                 end
             end
             if lastMatchRewards.Units and type(lastMatchRewards.Units) == "table" then
                 for _, u in ipairs(lastMatchRewards.Units) do
                     local uName = u.Id or "Unit"
                     local uCount = u.Count or 1
-                    local shiny = u.IsShiny and " ✨(Shiny)" or ""
-                    table.insert(rewardsList, "⭐ " .. tostring(uName) .. shiny .. " x" .. tostring(uCount))
+                    local shiny = u.IsShiny and " (Shiny)" or ""
+                    table.insert(rewardsList, tostring(uName) .. shiny .. " x" .. tostring(uCount))
                 end
             end
         end
@@ -5677,6 +5780,16 @@ task.spawn(function()
             end
         else
             -- Battle-only operations (In Gameplay)
+            if not lastMatchHudStageMap then
+                local pg = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("PlayingGui")
+                local sm = pg and pg:FindFirstChild("Frame") and pg.Frame:FindFirstChild("MainContainer")
+                    and pg.Frame.MainContainer:FindFirstChild("StageText")
+                    and pg.Frame.MainContainer.StageText:FindFirstChild("StageMap")
+                if sm and sm.Text and sm.Text ~= "" then
+                    lastMatchHudStageMap = sm.Text
+                end
+            end
+
             if State.WebhookEnabled and CheckAndSendMatchWebhook then
                 pcall(CheckAndSendMatchWebhook)
             end
