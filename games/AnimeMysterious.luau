@@ -549,10 +549,10 @@ end
 --// In-Game Gameplay Settings Map (PlayerGui.Settings Sync)
 local GameSettingsMap = {
     { StateKey = "AutoPlay", OptFlag = "Toggle_AutoPlay", GuiName = "Auto Autoplay", SettingKey = "Autoplay", Label = "Auto Play" },
-    { StateKey = "AutoNext", OptFlag = "Toggle_AutoNext", GuiName = "Auto Next", SettingKey = "AutoNext", Label = "Auto Next" },
-    { StateKey = "AutoReplay", OptFlag = "Toggle_AutoReplay", GuiName = "Auto Retry", SettingKey = "AutoRetry", Label = "Auto Replay" },
-    { StateKey = "AutoVoteStart", OptFlag = "Toggle_AutoVoteStart", GuiName = "Auto Vote Start", SettingKey = "AutoVoteStart", Label = "Auto Vote Start" },
-    { StateKey = "AutoWaveSkipping", OptFlag = "Toggle_AutoWaveSkipping", GuiName = "Auto Skip Wave", SettingKey = "AutoSkipWave", Label = "Auto Wave Skipping" },
+    { StateKey = "AutoNext", OptFlag = "Toggle_AutoNext", GuiName = "Auto Next", SettingKey = "AutoNext", Label = "Auto Next Stage" },
+    { StateKey = "AutoReplay", OptFlag = "Toggle_AutoReplay", GuiName = "Auto Retry", SettingKey = "AutoRetry", Label = "Auto Retry" },
+    { StateKey = "AutoVoteStart", OptFlag = "Toggle_AutoVoteStart", GuiName = "Auto Vote Start", SettingKey = "AutoVoteStart", Label = "Vote Start" },
+    { StateKey = "AutoWaveSkipping", OptFlag = "Toggle_AutoWaveSkipping", GuiName = "Auto Skip Wave", SettingKey = "AutoSkipWave", Label = "Auto Skip Wave" },
     { StateKey = "AutoMaxGameSpeed", OptFlag = "Toggle_AutoMaxGameSpeed", GuiName = "Auto Max Speed", SettingKey = "AutoMaxGameSpeed", Label = "Auto Max Game Speed" },
     { StateKey = "AutoUltimate", OptFlag = "Toggle_AutoUltimate", GuiName = "Auto Ultimate", SettingKey = "AutoUltimate", Label = "Auto Ultimate" }
 }
@@ -1122,6 +1122,50 @@ local function GetGameSetting(guiName, settingKey)
     return nil
 end
 
+--// Instant Battle Automation Functions (Instant Vote Start & Instant Skip Wave)
+local TriggerInstantVoteStart = nil
+local TriggerInstantSkipWave = nil
+
+TriggerInstantVoteStart = function()
+    if not isBattlePlace then return end
+    local isEnabled = (State.AutoVoteStart == true)
+    if SettingModule and SettingModule.GetSetting then
+        pcall(function()
+            local s = SettingModule:GetSetting("AutoVoteStart")
+            if s ~= nil then isEnabled = (s == true) end
+        end)
+    end
+    if not isEnabled then return end
+    if not LocalPlayer then return end
+    if LocalPlayer:GetAttribute("GameStarted") == true then return end
+    if LocalPlayer:GetAttribute("HasVotedStart") == true then return end
+    if workspace:GetAttribute("GameStarted") == true then return end
+
+    local VoteStartRequest = Remotes and Remotes:FindFirstChild("VoteStartRequest")
+    if VoteStartRequest then
+        pcall(function() VoteStartRequest:FireServer(LocalPlayer) end)
+    end
+end
+
+TriggerInstantSkipWave = function()
+    if not isBattlePlace then return end
+    local isEnabled = (State.AutoWaveSkipping == true)
+    if SettingModule and SettingModule.GetSetting then
+        pcall(function()
+            local s = SettingModule:GetSetting("AutoSkipWave")
+            if s ~= nil then isEnabled = (s == true) end
+        end)
+    end
+    if not isEnabled then return end
+    if workspace:GetAttribute("SkipWaveActive") ~= true then return end
+    if workspace:GetAttribute("SkipWaveTriggered") == true then return end
+
+    local VoteSkipWave = Remotes and Remotes:FindFirstChild("VoteSkipWave")
+    if VoteSkipWave then
+        pcall(function() VoteSkipWave:FireServer() end)
+    end
+end
+
 local function SetGameSetting(guiName, targetState, settingKey)
     local item = GetGameSettingItem(guiName)
     local btn = item and item:FindFirstChild("Slider") and item.Slider:FindFirstChild("Button")
@@ -1173,29 +1217,62 @@ local function SetGameSetting(guiName, targetState, settingKey)
                 end)
                 pcall(function() ChangeGameSpeedRequest:FireServer(speed) end)
             end
-        -- Auto Skip Wave vote request
+        -- Auto Skip Wave vote request (Instant 0ms)
         elseif settingKey == "AutoSkipWave" and targetState == true then
-            if workspace:GetAttribute("SkipWaveActive") then
-                local VoteSkipWave = Remotes and Remotes:FindFirstChild("VoteSkipWave")
-                if VoteSkipWave then
-                    pcall(function() VoteSkipWave:FireServer() end)
-                end
+            if TriggerInstantSkipWave then
+                TriggerInstantSkipWave()
             end
-        -- Auto Vote Start match request
+        -- Auto Vote Start match request (Instant 0ms)
         elseif settingKey == "AutoVoteStart" and targetState == true then
-            if LocalPlayer and LocalPlayer:GetAttribute("GameStarted") ~= true and LocalPlayer:GetAttribute("HasVotedStart") ~= true then
-                local VoteStartRequest = Remotes and Remotes:FindFirstChild("VoteStartRequest")
-                if VoteStartRequest then
-                    pcall(function() VoteStartRequest:FireServer(LocalPlayer) end)
-                end
+            if TriggerInstantVoteStart then
+                TriggerInstantVoteStart()
             end
         end
     end
     return true
 end
 
--- Sync from In-Game Settings to STRIX HUB (Unified Thread)
+-- Sync from In-Game Settings to STRIX HUB (Two-Way Instant Replica Listener + Polling Fallback)
 local function SetupGameSettingsSync()
+    -- 1. Real-time Event-Driven Replica Listener (0ms Sync from In-Game Settings)
+    task.spawn(function()
+        pcall(function()
+            if not SettingModule or not SettingModule.LocalReplica then
+                if SettingModule and SettingModule.WaitForInit then
+                    pcall(function() SettingModule:WaitForInit(5) end)
+                end
+            end
+            if SettingModule and SettingModule.LocalReplica and SettingModule.LocalReplica.ListenToChange then
+                for _, sInfo in ipairs(GameSettingsMap) do
+                    local key = sInfo.SettingKey
+                    local optFlag = sInfo.OptFlag
+                    local stateKey = sInfo.StateKey
+                    SettingModule.LocalReplica:ListenToChange({"Settings", key}, function(newVal)
+                        if newVal ~= nil and State[stateKey] ~= newVal and not isSyncingFromGame then
+                            isSyncingFromGame = true
+                            State[stateKey] = newVal
+                            if MacLib and MacLib.Options and MacLib.Options[optFlag] then
+                                pcall(function() MacLib.Options[optFlag]:UpdateState(newVal) end)
+                            end
+                            isSyncingFromGame = false
+                            if not isLoadingConfig then
+                                SaveConfigDebounced()
+                            end
+                            if isBattlePlace and newVal == true then
+                                if key == "AutoSkipWave" and TriggerInstantSkipWave then
+                                    TriggerInstantSkipWave()
+                                elseif key == "AutoVoteStart" and TriggerInstantVoteStart then
+                                    TriggerInstantVoteStart()
+                                end
+                            end
+                        end
+                    end)
+                end
+            end
+        end)
+    end)
+
+    -- 2. Polling Fallback (Double-checks visual sliders in PlayerGui.Settings every 1.0s)
     task.spawn(function()
         while isScriptRunning do
             task.wait(1.0)
@@ -1216,6 +1293,13 @@ local function SetupGameSettingsSync()
                     if not isLoadingConfig then
                         SaveConfigDebounced()
                     end
+                    if isBattlePlace and currentInGame == true then
+                        if sInfo.SettingKey == "AutoSkipWave" and TriggerInstantSkipWave then
+                            TriggerInstantSkipWave()
+                        elseif sInfo.SettingKey == "AutoVoteStart" and TriggerInstantVoteStart then
+                            TriggerInstantVoteStart()
+                        end
+                    end
                 end
             end
         end
@@ -1223,11 +1307,45 @@ local function SetupGameSettingsSync()
 end
 SetupGameSettingsSync()
 
--- In-Battle Gameplay Settings Continuous Enforcer
+-- In-Battle Real-time Triggers & Gameplay Settings Continuous Enforcer
 if isBattlePlace then
+    -- Real-time instant triggers for Vote Start (0ms delay)
+    task.defer(TriggerInstantVoteStart)
+    pcall(function()
+        LocalPlayer:GetAttributeChangedSignal("HasVotedStart"):Connect(TriggerInstantVoteStart)
+        LocalPlayer:GetAttributeChangedSignal("GameStarted"):Connect(TriggerInstantVoteStart)
+        workspace:GetAttributeChangedSignal("GameStarted"):Connect(TriggerInstantVoteStart)
+    end)
+    local ResetVoteStartUI = Remotes and Remotes:FindFirstChild("ResetVoteStartUI")
+    if ResetVoteStartUI then
+        ResetVoteStartUI.OnClientEvent:Connect(function()
+            task.defer(TriggerInstantVoteStart)
+        end)
+    end
+    local LoadingEvent = Remotes and Remotes:FindFirstChild("LoadingEvent")
+    if LoadingEvent then
+        LoadingEvent.OnClientEvent:Connect(function()
+            task.defer(TriggerInstantVoteStart)
+        end)
+    end
+
+    -- Real-time instant triggers for Skip Wave (0ms delay)
+    pcall(function()
+        workspace:GetAttributeChangedSignal("SkipWaveActive"):Connect(TriggerInstantSkipWave)
+        workspace:GetAttributeChangedSignal("SkipWaveVotes"):Connect(TriggerInstantSkipWave)
+        workspace:GetAttributeChangedSignal("SkipWaveRequired"):Connect(TriggerInstantSkipWave)
+    end)
+    local WaveCountdownEvent = Remotes and Remotes:FindFirstChild("WaveCountdownEvent")
+    if WaveCountdownEvent then
+        WaveCountdownEvent.OnClientEvent:Connect(function()
+            task.defer(TriggerInstantSkipWave)
+        end)
+    end
+
+    -- Continuous Enforcer loop (Fallback safety every 1.0s)
     task.spawn(function()
         while isScriptRunning do
-            task.wait(1.5)
+            task.wait(1.0)
             if not isScriptRunning then break end
             
             -- Keep AutoPlay active during live battle
@@ -1257,21 +1375,9 @@ if isBattlePlace then
                 end
             end
             
-            -- Automatically vote to skip wave when ready
-            if State.AutoWaveSkipping and workspace:GetAttribute("SkipWaveActive") == true then
-                local VoteSkipWave = Remotes and Remotes:FindFirstChild("VoteSkipWave")
-                if VoteSkipWave then
-                    pcall(function() VoteSkipWave:FireServer() end)
-                end
-            end
-            
-            -- Automatically vote to start game when waiting
-            if State.AutoVoteStart and LocalPlayer and LocalPlayer:GetAttribute("GameStarted") ~= true and LocalPlayer:GetAttribute("HasVotedStart") ~= true then
-                local VoteStartRequest = Remotes and Remotes:FindFirstChild("VoteStartRequest")
-                if VoteStartRequest then
-                    pcall(function() VoteStartRequest:FireServer(LocalPlayer) end)
-                end
-            end
+            -- Fallback checks
+            TriggerInstantSkipWave()
+            TriggerInstantVoteStart()
         end
     end)
 end
@@ -1612,15 +1718,58 @@ task.spawn(function()
                 if CheckAndSendMatchWebhook then
                     pcall(CheckAndSendMatchWebhook)
                 end
-                if (State.AutoLeaveChallenge or State.AutoLeaveOnChallengeReset) and not hasHandledLeave then
+
+                -- Priority 1: Check Auto Leave (Challenges or Party Host Leave)
+                local willAutoLeave = false
+                if ((State.AutoLeaveChallenge and IsChallengeMatch()) or (State.AutoLeaveOnChallengeReset and pendingResetLeave) or State.PartyAutoLeaveOnHostLeave) and not hasHandledLeave then
+                    willAutoLeave = true
                     task.delay(1.5, function()
                         CheckAndExecuteAutoLeave()
+                        if State.PartyAutoLeaveOnHostLeave and CheckHostLeftAndAutoLeave then
+                            pcall(CheckHostLeftAndAutoLeave)
+                        end
                     end)
                 end
-                if State.PartyAutoLeaveOnHostLeave and not hasHandledLeave then
-                    task.delay(1.5, function()
-                        if CheckHostLeftAndAutoLeave then
-                            pcall(CheckHostLeftAndAutoLeave)
+
+                -- Priority 2: Zero-Delay Auto Retry / Next Stage (Only if NOT scheduled to leave to lobby)
+                if not willAutoLeave and not hasHandledLeave then
+                    task.spawn(function()
+                        local isChallenge = IsChallengeMatch()
+                        local canNext = (a6 == true) and not isChallenge
+
+                        -- Resolve state with live SettingModule as sync fallback
+                        local doAutoNext = (State.AutoNext == true)
+                        local doAutoRetry = (State.AutoReplay == true)
+                        if SettingModule and SettingModule.GetSetting then
+                            pcall(function()
+                                local sN = SettingModule:GetSetting("AutoNext")
+                                if sN ~= nil then doAutoNext = (sN == true) end
+                                local sR = SettingModule:GetSetting("AutoRetry")
+                                if sR ~= nil then doAutoRetry = (sR == true) end
+                            end)
+                        end
+
+                        local ge = ReplicatedStorage:FindFirstChild("GameEvents") or ReplicatedStorage:WaitForChild("GameEvents", 2)
+                        local EndgameModule = select(2, pcall(require, ReplicatedStorage.Modules.Gameplay.EndgameModule))
+
+                        if isWon and canNext and doAutoNext then
+                            -- Zero-Delay Next Stage Request
+                            if EndgameModule and type(EndgameModule) == "table" then
+                                EndgameModule.ActionTaken = true
+                            end
+                            local NextStageRequest = ge and ge:FindFirstChild("NextStageRequest")
+                            if NextStageRequest then
+                                pcall(function() NextStageRequest:FireServer() end)
+                            end
+                        elseif doAutoRetry then
+                            -- Zero-Delay Retry Game Request
+                            if EndgameModule and type(EndgameModule) == "table" then
+                                EndgameModule.ActionTaken = true
+                            end
+                            local RetryGameRequest = ge and ge:FindFirstChild("RetryGameRequest")
+                            if RetryGameRequest then
+                                pcall(function() RetryGameRequest:FireServer() end)
+                            end
                         end
                     end)
                 end
