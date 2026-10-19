@@ -649,7 +649,8 @@ local State = {
     PartyAutoInvite = true,
     PartyAutoFollow = true,
     PartyAutoJoin = true,
-    PartyAutoLeaveOnHostLeave = true
+    PartyAutoLeaveOnHostLeave = true,
+    PartyAltWaitTimeout = 60
 }
 
 --// Config Paths (Save at workspace\STRIX HUB\<MapName>\<Username>.json)
@@ -784,6 +785,7 @@ if isfile(earlyTarget) then
         if earlyData.PartyAutoFollow ~= nil then State.PartyAutoFollow = (earlyData.PartyAutoFollow ~= false) end
         if earlyData.PartyAutoJoin ~= nil then State.PartyAutoJoin = (earlyData.PartyAutoJoin ~= false) end
         if earlyData.PartyAutoLeaveOnHostLeave ~= nil then State.PartyAutoLeaveOnHostLeave = (earlyData.PartyAutoLeaveOnHostLeave ~= false) end
+        if earlyData.PartyAltWaitTimeout ~= nil then State.PartyAltWaitTimeout = tonumber(earlyData.PartyAltWaitTimeout) or 60 end
     end
 end
 
@@ -925,7 +927,8 @@ local function SaveConfig()
         PartyAutoInvite = ResolveBool(State.PartyAutoInvite, diskData.PartyAutoInvite, true),
         PartyAutoFollow = ResolveBool(State.PartyAutoFollow, diskData.PartyAutoFollow, true),
         PartyAutoJoin = ResolveBool(State.PartyAutoJoin, diskData.PartyAutoJoin, true),
-        PartyAutoLeaveOnHostLeave = ResolveBool(State.PartyAutoLeaveOnHostLeave, diskData.PartyAutoLeaveOnHostLeave, true)
+        PartyAutoLeaveOnHostLeave = ResolveBool(State.PartyAutoLeaveOnHostLeave, diskData.PartyAutoLeaveOnHostLeave, true),
+        PartyAltWaitTimeout = tonumber(State.PartyAltWaitTimeout) or 60
     }
 
     local okEnc, encoded = pcall(function() return HttpService:JSONEncode(payload) end)
@@ -2796,6 +2799,7 @@ local RefreshAltsUIRef = nil
 local UpdateAltsParagraphRef = nil
 local lastPartyWaitNotification = 0
 local lastAltUiRefresh = 0
+local partyWaitStartTime = 0
 
 local function NormalizeUsername(name)
     if not name then return "" end
@@ -3231,21 +3235,47 @@ local function TriggerMatchStart(overrideMode, overrideMap, overrideStage, overr
         return true, "Already teleporting"
     end
 
-    -- Party System Gate: If Party is enabled and role is Host, wait for all ALTs before match start
+    -- Party System Gate: If Party is enabled and role is Host, wait for all ALTs before match start (with timeout)
     if not force and State.PartyEnabled and State.PartyRole == "Host" then
         local allIn, missing = AreAllAltsInRoom()
         if not allIn and #missing > 0 then
-            if os.clock() - lastPartyWaitNotification > 4.0 then
-                lastPartyWaitNotification = os.clock()
+            -- Initialize wait timer on first encounter
+            if partyWaitStartTime == 0 then
+                partyWaitStartTime = os.clock()
+            end
+
+            local timeoutSec = tonumber(State.PartyAltWaitTimeout) or 60
+            local elapsed = os.clock() - partyWaitStartTime
+            local remaining = math.max(0, math.ceil(timeoutSec - elapsed))
+
+            -- Timeout expired: proceed without missing Alts
+            if timeoutSec > 0 and elapsed >= timeoutSec then
+                partyWaitStartTime = 0
                 pcall(function()
                     MacLib:Notify({
                         Title = "Party System",
-                        Description = "⏳ Waiting for ALTs (" .. #missing .. " missing): " .. table.concat(missing, ", "),
-                        Lifetime = 3.5
+                        Description = "⚠️ Timeout (" .. timeoutSec .. "s)! Starting without: " .. table.concat(missing, ", "),
+                        Lifetime = 5
                     })
                 end)
+                -- Fall through to start the match
+            else
+                -- Still waiting: show periodic notification
+                if os.clock() - lastPartyWaitNotification > 4.0 then
+                    lastPartyWaitNotification = os.clock()
+                    pcall(function()
+                        MacLib:Notify({
+                            Title = "Party System",
+                            Description = "⏳ Waiting for ALTs (" .. #missing .. " missing, " .. remaining .. "s left): " .. table.concat(missing, ", "),
+                            Lifetime = 3.5
+                        })
+                    end)
+                end
+                return false, "Waiting for ALTs"
             end
-            return false, "Waiting for ALTs"
+        else
+            -- All Alts are in room, reset timer
+            partyWaitStartTime = 0
         end
     end
     
@@ -4619,6 +4649,19 @@ PartySections.System:Toggle({
         end
     end
 }, "Toggle_PartyAutoLeaveOnHostLeave")
+
+PartySections.System:Input({
+    Name = "Alt Wait Timeout (sec)",
+    Default = tostring(tonumber(State.PartyAltWaitTimeout) or 60),
+    Placeholder = "60",
+    Callback = function(val)
+        local num = tonumber(val)
+        if num and num >= 1 then
+            State.PartyAltWaitTimeout = math.floor(num)
+            SaveConfigDebounced()
+        end
+    end
+}, "Input_PartyAltWaitTimeout")
 
 -- [Menu] Right Side: Host Invite
 PartySections.HostInvite:Header({ Text = "Host Invite" })
@@ -6194,6 +6237,9 @@ LoadConfig = function()
         end
         if data.PartyAutoLeaveOnHostLeave ~= nil and MacLib.Options["Toggle_PartyAutoLeaveOnHostLeave"] then
             pcall(function() MacLib.Options["Toggle_PartyAutoLeaveOnHostLeave"]:UpdateState(data.PartyAutoLeaveOnHostLeave) end)
+        end
+        if data.PartyAltWaitTimeout ~= nil and MacLib.Options["Input_PartyAltWaitTimeout"] then
+            pcall(function() MacLib.Options["Input_PartyAltWaitTimeout"]:UpdateText(tostring(data.PartyAltWaitTimeout)) end)
         end
     end)
     if not okMain then
