@@ -650,7 +650,8 @@ local State = {
     PartyAutoFollow = true,
     PartyAutoJoin = true,
     PartyAutoLeaveOnHostLeave = true,
-    PartyAltWaitTimeout = 60
+    PartyAltWaitTimeout = 60,
+    PartyExcludeChallenges = true
 }
 
 --// Config Paths (Save at workspace\STRIX HUB\<MapName>\<Username>.json)
@@ -786,6 +787,7 @@ if isfile(earlyTarget) then
         if earlyData.PartyAutoJoin ~= nil then State.PartyAutoJoin = (earlyData.PartyAutoJoin ~= false) end
         if earlyData.PartyAutoLeaveOnHostLeave ~= nil then State.PartyAutoLeaveOnHostLeave = (earlyData.PartyAutoLeaveOnHostLeave ~= false) end
         if earlyData.PartyAltWaitTimeout ~= nil then State.PartyAltWaitTimeout = tonumber(earlyData.PartyAltWaitTimeout) or 60 end
+        if earlyData.PartyExcludeChallenges ~= nil then State.PartyExcludeChallenges = (earlyData.PartyExcludeChallenges ~= false) else State.PartyExcludeChallenges = true end
     end
 end
 
@@ -928,7 +930,8 @@ local function SaveConfig()
         PartyAutoFollow = ResolveBool(State.PartyAutoFollow, diskData.PartyAutoFollow, true),
         PartyAutoJoin = ResolveBool(State.PartyAutoJoin, diskData.PartyAutoJoin, true),
         PartyAutoLeaveOnHostLeave = ResolveBool(State.PartyAutoLeaveOnHostLeave, diskData.PartyAutoLeaveOnHostLeave, true),
-        PartyAltWaitTimeout = tonumber(State.PartyAltWaitTimeout) or 60
+        PartyAltWaitTimeout = tonumber(State.PartyAltWaitTimeout) or 60,
+        PartyExcludeChallenges = ResolveBool(State.PartyExcludeChallenges, diskData.PartyExcludeChallenges, true)
     }
 
     local okEnc, encoded = pcall(function() return HttpService:JSONEncode(payload) end)
@@ -1386,6 +1389,9 @@ local function GetRoomModeFromMap(mapName)
     if not mapName or mapName == "" then return "Story" end
     local cleanName = string.gsub(mapName, "%s*%[.-%]", "")
     local cClean = string.lower(cleanName)
+    if string.find(cClean, "challenge") or string.find(cClean, "challange") then
+        return "Challenge"
+    end
     for _, mc in ipairs(MapConfig) do
         if mc.Name and string.lower(mc.Name) == cClean then
             return mc.Mode or "Story"
@@ -1436,6 +1442,36 @@ end
 local function IsRoomCreated()
     local info = GetCurrentRoomInfo()
     return info ~= nil
+end
+
+local isHostChallengeRoomActive = false
+
+local function IsCurrentRoomChallenge()
+    if isHostChallengeRoomActive then
+        return true
+    end
+    if PlayModule and (PlayModule.SessionMode == "Challange" or PlayModule.SessionMode == "Challenge") then
+        return true
+    end
+    local room = GetCurrentRoomInfo()
+    if room then
+        local mName = string.lower(room.MapName or "")
+        local mMode = string.lower(tostring(room.Mode or ""))
+        if string.find(mName, "challenge") or string.find(mName, "challange")
+            or mMode == "challenge" or mMode == "challange" then
+            return true
+        end
+    end
+    local PlayGUI = LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("PlayGUI")
+    local pf = PlayGUI and PlayGUI:FindFirstChild("PlayFrame")
+    if pf and pf.Visible then
+        for _, lbl in ipairs(pf:GetDescendants()) do
+            if lbl:IsA("TextLabel") and (string.find(string.lower(lbl.Text), "challenge") or string.find(string.lower(lbl.Text), "challange")) then
+                return true
+            end
+        end
+    end
+    return false
 end
 
 local function DoesRoomMatch(targetMode, targetMapName, targetStage, targetDiff)
@@ -3021,6 +3057,9 @@ local function ProcessPartySystem()
 
     -- HOST ROLE
     if State.PartyRole == "Host" then
+        local isChallenge = IsCurrentRoomChallenge()
+        local shouldExcludeAlts = isChallenge and (State.PartyExcludeChallenges ~= false)
+
         pcall(function()
             local hostInfo = {
                 Host = LocalPlayer.Name,
@@ -3028,12 +3067,14 @@ local function ProcessPartySystem()
                 JobId = game.JobId,
                 PlaceId = game.PlaceId,
                 Timestamp = os.time(),
-                InRoom = IsRoomCreated()
+                InRoom = IsRoomCreated() and not shouldExcludeAlts,
+                IsChallenge = isChallenge,
+                Mode = isChallenge and "Challenge" or "Normal"
             }
             writefile(PARTY_HOST_FILE, HttpService:JSONEncode(hostInfo))
         end)
 
-        if IsRoomCreated() then
+        if IsRoomCreated() and not shouldExcludeAlts then
             -- Auto Invite Alts
             if State.PartyAutoInvite then
                 local LobbyInvite = Remotes and Remotes:FindFirstChild("LobbyInvite")
@@ -3070,22 +3111,46 @@ local function ProcessPartySystem()
         local targetHost = string.lower(NormalizeUsername(State.PartyHost or ""))
         if targetHost == "" then return end
 
-        -- 1. Auto Follow Host Server
-        if State.PartyAutoFollow and isfile and isfile(PARTY_HOST_FILE) then
+        -- Safety: If Alt is currently in a Challenge room and exclusion is on, leave immediately
+        if (State.PartyExcludeChallenges ~= false) and IsRoomCreated() and IsCurrentRoomChallenge() then
+            pcall(function()
+                if LeaveLobbyEvent then
+                    LeaveLobbyEvent:FireServer()
+                end
+            end)
+            return
+        end
+
+        local hostData = nil
+        if isfile and isfile(PARTY_HOST_FILE) then
             local ok, info = pcall(function() return HttpService:JSONDecode(readfile(PARTY_HOST_FILE)) end)
             if ok and type(info) == "table" and string.lower(NormalizeUsername(info.Host or "")) == targetHost then
-                if info.JobId and info.JobId ~= game.JobId and os.time() - (info.Timestamp or 0) < 60 then
-                    pcall(function()
-                        game:GetService("TeleportService"):TeleportToPlaceInstance(info.PlaceId or game.PlaceId, info.JobId, LocalPlayer)
-                    end)
-                    task.wait(5)
-                    return
-                end
+                hostData = info
+            end
+        end
+
+        local hostInChallenge = hostData and (hostData.IsChallenge == true or hostData.Mode == "Challenge")
+        if (State.PartyExcludeChallenges ~= false) and hostInChallenge then
+            return
+        end
+
+        -- 1. Auto Follow Host Server
+        if State.PartyAutoFollow and hostData then
+            if hostData.JobId and hostData.JobId ~= game.JobId and os.time() - (hostData.Timestamp or 0) < 60 then
+                pcall(function()
+                    game:GetService("TeleportService"):TeleportToPlaceInstance(hostData.PlaceId or game.PlaceId, hostData.JobId, LocalPlayer)
+                end)
+                task.wait(5)
+                return
             end
         end
 
         -- 2. Join Host's Room in same server
         if (State.PartyAutoJoin ~= false) and not IsRoomCreated() then
+            if hostData and (hostData.InRoom == false or ((State.PartyExcludeChallenges ~= false) and hostData.IsChallenge)) then
+                return
+            end
+
             local GetLobbyList = Remotes and Remotes:FindFirstChild("GetLobbyList")
             local RequestJoinLobby = Remotes and Remotes:FindFirstChild("RequestJoinLobby")
             if GetLobbyList and RequestJoinLobby then
@@ -3093,6 +3158,15 @@ local function ProcessPartySystem()
                 if ok and type(lobbies) == "table" then
                     for _, room in ipairs(lobbies) do
                         if string.lower(NormalizeUsername(room.HostName or "")) == targetHost then
+                            local rMode = string.lower(tostring(room.Mode or room.GameMode or ""))
+                            local rMap = string.lower(tostring(room.MapName or room.Name or ""))
+                            local isRoomChall = string.find(rMode, "challenge") or string.find(rMode, "challange")
+                                or string.find(rMap, "challenge") or string.find(rMap, "challange")
+                            
+                            if (State.PartyExcludeChallenges ~= false) and isRoomChall then
+                                break
+                            end
+
                             pcall(function()
                                 RequestJoinLobby:InvokeServer("Join", room.RoomId)
                             end)
@@ -3123,6 +3197,13 @@ pcall(function()
                 local hName = string.lower(hostPlayer.Name or "")
                 local hDisplay = string.lower(hostPlayer.DisplayName or "")
                 if targetHost ~= "" and (hName == targetHost or hDisplay == targetHost) then
+                    if (State.PartyExcludeChallenges ~= false) and isfile and isfile(PARTY_HOST_FILE) then
+                        local ok, info = pcall(function() return HttpService:JSONDecode(readfile(PARTY_HOST_FILE)) end)
+                        if ok and type(info) == "table" and (info.IsChallenge == true or info.Mode == "Challenge") then
+                            return
+                        end
+                    end
+
                     pcall(function()
                         RequestJoinLobby:InvokeServer("Join", roomId)
                     end)
@@ -3385,7 +3466,10 @@ local function TriggerMatchStart(overrideMode, overrideMap, overrideStage, overr
     end
 
     -- Party System Gate: If Party is enabled and role is Host, wait for all ALTs before match start (with timeout)
-    if not force and State.PartyEnabled and State.PartyRole == "Host" then
+    -- EXCEPT if it's a Challenge match with PartyExcludeChallenges enabled!
+    local isChallengeRoom = IsCurrentRoomChallenge()
+    local shouldExcludeAlts = isChallengeRoom and (State.PartyExcludeChallenges ~= false)
+    if not force and not shouldExcludeAlts and State.PartyEnabled and State.PartyRole == "Host" then
         local allIn, missing = AreAllAltsInRoom()
         if not allIn and #missing > 0 then
             -- Initialize wait timer on first encounter
@@ -4499,6 +4583,18 @@ ChallengeSections.Main:Toggle({
     end
 }, "Toggle_AutoLeaveOnChallengeReset")
 
+ChallengeSections.Main:Toggle({
+    Name = "Exclude Alts (Solo Challenge)",
+    Default = (State.PartyExcludeChallenges ~= false),
+    Callback = function(val)
+        State.PartyExcludeChallenges = val
+        SaveConfigDebounced()
+        if MacLib.Options["Toggle_PartyExcludeChallenges_Party"] then
+            pcall(function() MacLib.Options["Toggle_PartyExcludeChallenges_Party"]:UpdateState(val) end)
+        end
+    end
+}, "Toggle_PartyExcludeChallenges")
+
 ChallengeSections.Main:Dropdown({
     Name = "Target Challenges",
     Multi = true,
@@ -4798,6 +4894,18 @@ PartySections.System:Toggle({
         end
     end
 }, "Toggle_PartyAutoLeaveOnHostLeave")
+
+PartySections.System:Toggle({
+    Name = "Exclude Alts from Challenges",
+    Default = (State.PartyExcludeChallenges ~= false),
+    Callback = function(val)
+        State.PartyExcludeChallenges = val
+        SaveConfigDebounced()
+        if MacLib.Options["Toggle_PartyExcludeChallenges"] then
+            pcall(function() MacLib.Options["Toggle_PartyExcludeChallenges"]:UpdateState(val) end)
+        end
+    end
+}, "Toggle_PartyExcludeChallenges_Party")
 
 PartySections.System:Input({
     Name = "Alt Wait Timeout (sec)",
@@ -5556,6 +5664,18 @@ ProcessAutoChallenges = function()
             return false
         end
 
+        isHostChallengeRoomActive = true
+
+        -- If Exclude Alts is enabled and another player/Alt is in the room, leave and recreate solo room
+        if (State.PartyExcludeChallenges ~= false) and #GetPlayersInRoom() > 1 then
+            pcall(function()
+                if LeaveLobbyEvent then
+                    LeaveLobbyEvent:FireServer()
+                end
+            end)
+            return false
+        end
+
         if not PlayGUI.Enabled then
             PlayGUI.Enabled = true
         end
@@ -5575,6 +5695,7 @@ ProcessAutoChallenges = function()
                     end
                 end)
                 task.delay(2.5, function() challengeDebounce = false end)
+                task.delay(10, function() isHostChallengeRoomActive = false end)
                 return true
             end
         end
@@ -5633,6 +5754,18 @@ ProcessAutoChallenges = function()
             end
             
             -- Feature 2: Direct Remote Lobby Creation (Zero UI Navigation)
+            isHostChallengeRoomActive = true
+
+            -- If Exclude Alts is enabled and we are in a room with other players (e.g. Alts from Story), disband room first
+            if (State.PartyExcludeChallenges ~= false) and IsRoomCreated() and #GetPlayersInRoom() > 1 then
+                pcall(function()
+                    if LeaveLobbyEvent then
+                        LeaveLobbyEvent:FireServer()
+                    end
+                end)
+                task.wait(0.35)
+            end
+
             if not IsRoomCreated() then
                 pcall(function()
                     if RequestJoinLobby then
@@ -5644,6 +5777,23 @@ ProcessAutoChallenges = function()
             if PlayModule then
                 PlayModule.SessionMode = "Challange"
                 PlayModule.isHost = true
+            end
+
+            -- Immediately announce host is in Challenge so Alts do not attempt to join
+            if State.PartyRole == "Host" and (State.PartyExcludeChallenges ~= false) then
+                pcall(function()
+                    local hostInfo = {
+                        Host = LocalPlayer.Name,
+                        HostUserId = LocalPlayer.UserId,
+                        JobId = game.JobId,
+                        PlaceId = game.PlaceId,
+                        Timestamp = os.time(),
+                        InRoom = false,
+                        IsChallenge = true,
+                        Mode = "Challenge"
+                    }
+                    writefile(PARTY_HOST_FILE, HttpService:JSONEncode(hostInfo))
+                end)
             end
             
             pcall(function()
@@ -5683,6 +5833,7 @@ ProcessAutoChallenges = function()
         
         task.wait(2.5)
         challengeDebounce = false
+        task.delay(10, function() isHostChallengeRoomActive = false end)
     end)
     
     return true
@@ -6010,6 +6161,15 @@ task.spawn(function()
             end
             if State.AutoLeaveOnChallengeReset then
                 CheckChallengeResetLeave()
+            end
+
+            -- Safety: If this account is an Alt, exclusion is enabled, and match is a Challenge match, leave immediately!
+            if (State.PartyExcludeChallenges ~= false) and State.PartyRole == "Alt" and IsChallengeMatch() and not hasHandledLeave then
+                hasHandledLeave = true
+                task.spawn(function()
+                    print("[STRIX HUB] Alt detected in Challenge match! Auto leaving to lobby...")
+                    ExecuteLeaveToLobby("Alt in Challenge", "Alts do not participate in Challenges. Leaving to Lobby...")
+                end)
             end
 
             if State.PartyAutoLeaveOnHostLeave and CheckHostLeftAndAutoLeave then
@@ -6389,6 +6549,14 @@ LoadConfig = function()
         end
         if data.PartyAltWaitTimeout ~= nil and MacLib.Options["Input_PartyAltWaitTimeout"] then
             pcall(function() MacLib.Options["Input_PartyAltWaitTimeout"]:UpdateText(tostring(data.PartyAltWaitTimeout)) end)
+        end
+        if data.PartyExcludeChallenges ~= nil then
+            if MacLib.Options["Toggle_PartyExcludeChallenges"] then
+                pcall(function() MacLib.Options["Toggle_PartyExcludeChallenges"]:UpdateState(data.PartyExcludeChallenges) end)
+            end
+            if MacLib.Options["Toggle_PartyExcludeChallenges_Party"] then
+                pcall(function() MacLib.Options["Toggle_PartyExcludeChallenges_Party"]:UpdateState(data.PartyExcludeChallenges) end)
+            end
         end
     end)
     if not okMain then
