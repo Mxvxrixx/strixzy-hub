@@ -4583,18 +4583,6 @@ ChallengeSections.Main:Toggle({
     end
 }, "Toggle_AutoLeaveOnChallengeReset")
 
-ChallengeSections.Main:Toggle({
-    Name = "Exclude Alts (Solo Challenge)",
-    Default = (State.PartyExcludeChallenges ~= false),
-    Callback = function(val)
-        State.PartyExcludeChallenges = val
-        SaveConfigDebounced()
-        if MacLib.Options["Toggle_PartyExcludeChallenges_Party"] then
-            pcall(function() MacLib.Options["Toggle_PartyExcludeChallenges_Party"]:UpdateState(val) end)
-        end
-    end
-}, "Toggle_PartyExcludeChallenges")
-
 ChallengeSections.Main:Dropdown({
     Name = "Target Challenges",
     Multi = true,
@@ -4901,11 +4889,8 @@ PartySections.System:Toggle({
     Callback = function(val)
         State.PartyExcludeChallenges = val
         SaveConfigDebounced()
-        if MacLib.Options["Toggle_PartyExcludeChallenges"] then
-            pcall(function() MacLib.Options["Toggle_PartyExcludeChallenges"]:UpdateState(val) end)
-        end
     end
-}, "Toggle_PartyExcludeChallenges_Party")
+}, "Toggle_PartyExcludeChallenges")
 
 PartySections.System:Input({
     Name = "Alt Wait Timeout (sec)",
@@ -6550,13 +6535,8 @@ LoadConfig = function()
         if data.PartyAltWaitTimeout ~= nil and MacLib.Options["Input_PartyAltWaitTimeout"] then
             pcall(function() MacLib.Options["Input_PartyAltWaitTimeout"]:UpdateText(tostring(data.PartyAltWaitTimeout)) end)
         end
-        if data.PartyExcludeChallenges ~= nil then
-            if MacLib.Options["Toggle_PartyExcludeChallenges"] then
-                pcall(function() MacLib.Options["Toggle_PartyExcludeChallenges"]:UpdateState(data.PartyExcludeChallenges) end)
-            end
-            if MacLib.Options["Toggle_PartyExcludeChallenges_Party"] then
-                pcall(function() MacLib.Options["Toggle_PartyExcludeChallenges_Party"]:UpdateState(data.PartyExcludeChallenges) end)
-            end
+        if data.PartyExcludeChallenges ~= nil and MacLib.Options["Toggle_PartyExcludeChallenges"] then
+            pcall(function() MacLib.Options["Toggle_PartyExcludeChallenges"]:UpdateState(data.PartyExcludeChallenges) end)
         end
     end)
     if not okMain then
