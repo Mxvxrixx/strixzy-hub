@@ -1,16 +1,16 @@
 -- ==============================================================================
 -- STRIX HUB | Mini City Wars
--- Standard Master UI Architecture & Archetype Blueprint
--- Supported Place IDs: 133756580238784 (Main), 113956197828246 (Novice), 112820989813035 (Pro)
+-- Standard UI Archetype Blueprint: AnimeMysterious Standard
 -- ==============================================================================
 
 -- ==============================================================================
--- 1. VERIFICATION & SAFETY GATE (Auto-Execute Lifecycle Gate)
+-- 0. GAME & CLIENT LOAD VERIFICATION (Auto-Execute Safety Gate)
 -- ==============================================================================
 if not game:IsLoaded() then
     game.Loaded:Wait()
 end
 
+-- Engine & Render Pipeline Stabilization Delay for Auto-Execute
 task.wait(1.5)
 
 local Players = game:GetService("Players")
@@ -22,10 +22,12 @@ if not LocalPlayer or not LocalPlayer.Name or LocalPlayer.Name == "" or (LocalPl
     until LocalPlayer and LocalPlayer.UserId and LocalPlayer.UserId > 0 and LocalPlayer.Name ~= ""
 end
 
+-- Wait for PlayerGui
 if not LocalPlayer:FindFirstChild("PlayerGui") then
     LocalPlayer:WaitForChild("PlayerGui", 25)
 end
 
+-- Wait for Character & HumanoidRootPart
 if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
     pcall(function()
         if not LocalPlayer.Character then
@@ -37,7 +39,7 @@ if not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChild("Humano
     end)
 end
 
--- Viewport stabilization (Prevents CanvasGroup / rendering crashes)
+-- Viewport / Camera stabilization (Prevents rendering pipeline crash on early UI creation)
 pcall(function()
     local camera = workspace.CurrentCamera or workspace:WaitForChild("Camera", 10)
     if camera then
@@ -48,7 +50,17 @@ pcall(function()
     end
 end)
 
--- Safe Instance Cleanup (Neutralizes duplicate threads & memory leaks)
+--// Storage & Folder Initialization
+local ConfigFolder = "STRIX HUB/Mini City Wars"
+local ConfigFile = ConfigFolder .. "/" .. tostring(LocalPlayer.Name) .. ".json"
+
+local function EnsureFolders()
+    if isfolder and not isfolder("STRIX HUB") then pcall(makefolder, "STRIX HUB") end
+    if isfolder and not isfolder(ConfigFolder) then pcall(makefolder, ConfigFolder) end
+end
+EnsureFolders()
+
+--// Safe Instance Cleanup (Neutralizes Unload recursion & dead C++ instance crashes)
 if getgenv().STRIX_HUB_CLEANUP then
     pcall(getgenv().STRIX_HUB_CLEANUP)
     task.wait(0.2)
@@ -58,7 +70,7 @@ pcall(function()
     local searchLocations = {
         (gethui and gethui()) or game:GetService("CoreGui"),
         game:GetService("CoreGui"):FindFirstChild("RobloxGui"),
-        LocalPlayer and LocalPlayer:FindFirstChild("PlayerGui")
+        game:GetService("Players").LocalPlayer and game:GetService("Players").LocalPlayer:FindFirstChild("PlayerGui")
     }
     for _, loc in ipairs(searchLocations) do
         if loc then
@@ -72,22 +84,8 @@ pcall(function()
 end)
 
 local isScriptRunning = true
-local scriptConnections = {}
-local scriptTasks = {}
-
 getgenv().STRIX_HUB_CLEANUP = function()
     isScriptRunning = false
-    
-    for _, conn in ipairs(scriptConnections) do
-        pcall(function() conn:Disconnect() end)
-    end
-    table.clear(scriptConnections)
-    
-    for _, t in ipairs(scriptTasks) do
-        pcall(function() task.cancel(t) end)
-    end
-    table.clear(scriptTasks)
-
     if getgenv().STRIX_ANTI_AFK_CON then
         pcall(function() getgenv().STRIX_ANTI_AFK_CON:Disconnect() end)
         getgenv().STRIX_ANTI_AFK_CON = nil
@@ -104,20 +102,14 @@ getgenv().STRIX_HUB_CLEANUP = function()
         pcall(getgenv().STRIX_UI_RESIZE_CLEANUP)
         getgenv().STRIX_UI_RESIZE_CLEANUP = nil
     end
+    if getgenv().STRIX_KEYBIND_CON then
+        pcall(function() getgenv().STRIX_KEYBIND_CON:Disconnect() end)
+        getgenv().STRIX_KEYBIND_CON = nil
+    end
 end
 
--- Anti-AFK Protection
-pcall(function()
-    local virtualUser = game:GetService("VirtualUser")
-    getgenv().STRIX_ANTI_AFK_CON = LocalPlayer.Idled:Connect(function()
-        if not isScriptRunning then return end
-        virtualUser:CaptureController()
-        virtualUser:ClickButton2(Vector2.zero)
-    end)
-end)
-
 -- ==============================================================================
--- 2. SERVICES & REMOTES RESOLUTION
+-- 1. SERVICES & REMOTES RESOLUTION
 -- ==============================================================================
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
@@ -125,75 +117,418 @@ local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 
-local RemotesFolder = ReplicatedStorage:WaitForChild("Remotes", 25) or ReplicatedStorage:FindFirstChild("Remotes")
-if not RemotesFolder then
-    warn("[STRIX HUB] Remotes folder not found in ReplicatedStorage!")
+local Remotes = ReplicatedStorage:WaitForChild("Remotes", 25)
+
+-- Economy Remotes
+local EconomyRemotes = Remotes and Remotes:WaitForChild("Economy", 15)
+local CollectRequest = EconomyRemotes and EconomyRemotes:WaitForChild("CollectRequest", 15)
+
+-- Building Remotes (Repair System)
+local BuildingRemotes = Remotes and Remotes:WaitForChild("Building", 15)
+local RequestRepairBuilding = BuildingRemotes and BuildingRemotes:WaitForChild("RequestRepairBuilding", 15)
+local RepairResult = BuildingRemotes and BuildingRemotes:WaitForChild("RepairResult", 15)
+
+-- Quests Remotes
+local QuestsRemotes = Remotes and Remotes:WaitForChild("Quests", 15)
+local QuestState = QuestsRemotes and QuestsRemotes:WaitForChild("QuestState", 15)
+local ClaimQuest = QuestsRemotes and QuestsRemotes:WaitForChild("ClaimQuest", 15)
+local ClaimLegacy = QuestsRemotes and QuestsRemotes:WaitForChild("ClaimLegacy", 15)
+local RequestQuestState = QuestsRemotes and QuestsRemotes:WaitForChild("RequestQuestState", 15)
+
+-- Plot Owners Attribute Storage
+local PlotOwners = ReplicatedStorage:WaitForChild("PlotOwners", 15)
+
+-- Quests Data Cache
+local cachedQuestData = nil
+
+if QuestState then
+    QuestState.OnClientEvent:Connect(function(data)
+        if type(data) == "table" then
+            cachedQuestData = data
+        end
+    end)
+    task.defer(function()
+        if RequestQuestState then
+            pcall(function() RequestQuestState:FireServer() end)
+        end
+    end)
+end
+
+-- Helper: Format Number with commas (e.g. 1,000,000)
+local function FormatNumber(val)
+    local n = tonumber(val) or 0
+    local formatted = tostring(math.floor(n))
+    local k
+    while true do
+        formatted, k = string.gsub(formatted, "^(-?%d+)(%d%d%d)", "%1,%2")
+        if k == 0 then break end
+    end
+    return formatted
+end
+
+-- Helper: Find player's assigned plot in workspace.Plots
+local function GetPlayerPlot()
+    if PlotOwners then
+        for i = 1, 6 do
+            if PlotOwners:GetAttribute("Plot" .. i .. "_Id") == LocalPlayer.UserId then
+                local plots = workspace:FindFirstChild("Plots")
+                local p = plots and plots:FindFirstChild("Plot" .. i)
+                if p then return p end
+            end
+        end
+    end
+
+    -- Fallback: detect by building OwnerId
+    local plots = workspace:FindFirstChild("Plots")
+    if plots then
+        for _, p in ipairs(plots:GetChildren()) do
+            local bFolder = p:FindFirstChild("Buildings")
+            if bFolder then
+                for _, b in ipairs(bFolder:GetChildren()) do
+                    if b:GetAttribute("OwnerId") == LocalPlayer.UserId then
+                        return p
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- Helper: Collect Cash from all owned buildings that have PendingCash
+local function CollectCashFromBuildings()
+    if not CollectRequest then return 0 end
+    local plot = GetPlayerPlot()
+    if not plot then return 0 end
+    local buildingsFolder = plot:FindFirstChild("Buildings")
+    if not buildingsFolder then return 0 end
+
+    local count = 0
+    for _, building in ipairs(buildingsFolder:GetChildren()) do
+        if not isScriptRunning then break end
+        local pending = tonumber(building:GetAttribute("PendingCash")) or 0
+        if pending > 0 then
+            pcall(function()
+                CollectRequest:FireServer(building)
+                building:SetAttribute("PendingCash", 0)
+            end)
+            count = count + 1
+        end
+    end
+    return count
+end
+
+-- Helper: Get list of rubble/ruins owned by LocalPlayer (in Buildings and Walls)
+local function GetRubbleList()
+    local rubbles = {}
+    local plot = GetPlayerPlot()
+    if plot then
+        for _, folderName in ipairs({"Buildings", "Walls"}) do
+            local folder = plot:FindFirstChild(folderName)
+            if folder then
+                for _, obj in ipairs(folder:GetChildren()) do
+                    if obj:GetAttribute("IsRubble") == true and obj:GetAttribute("OwnerId") == LocalPlayer.UserId then
+                        table.insert(rubbles, obj)
+                    end
+                end
+            end
+        end
+    end
+    return rubbles
+end
+
+-- Helper: Repair all destroyed buildings & broken walls
+local function RepairAllRuins()
+    if not RequestRepairBuilding then return 0 end
+    if LocalPlayer:GetAttribute("UnderRaid") == true then
+        return 0
+    end
+
+    local rubbles = GetRubbleList()
+    local count = 0
+    for _, ruin in ipairs(rubbles) do
+        if not isScriptRunning then break end
+        if ruin.Parent and ruin:GetAttribute("IsRubble") == true then
+            pcall(function()
+                RequestRepairBuilding:FireServer(ruin)
+            end)
+            count = count + 1
+            task.wait(0.15)
+        end
+    end
+    return count
+end
+
+-- Helper: Claim Completed Daily and Legacy Quests
+local function ClaimCompletedQuests()
+    if not cachedQuestData then
+        if RequestQuestState then
+            pcall(function() RequestQuestState:FireServer() end)
+        end
+        return 0
+    end
+
+    local claimedCount = 0
+
+    -- 1. Daily Quests Claim
+    if type(cachedQuestData.daily) == "table" then
+        for _, q in ipairs(cachedQuestData.daily) do
+            if not isScriptRunning then break end
+            if q.done and q.slot then
+                pcall(function()
+                    ClaimQuest:FireServer(q.slot)
+                end)
+                q.done = false
+                claimedCount = claimedCount + 1
+                task.wait(0.15)
+            end
+        end
+    end
+
+    -- 2. Legacy Quests Claim
+    if type(cachedQuestData.legacy) == "table" then
+        for _, q in ipairs(cachedQuestData.legacy) do
+            if not isScriptRunning then break end
+            if q.done and q.id then
+                pcall(function()
+                    ClaimLegacy:FireServer(q.id)
+                end)
+                q.done = false
+                claimedCount = claimedCount + 1
+                task.wait(0.15)
+            end
+        end
+    end
+
+    if RequestQuestState then
+        pcall(function() RequestQuestState:FireServer() end)
+    end
+
+    return claimedCount
+end
+
+-- ==============================================================================
+-- 2. MACLIB SOURCE LOADING & REGEX PATCHES
+-- ==============================================================================
+local MacLib = nil
+local MacLibCacheFile = "STRIX HUB/maclib_cache.lua"
+local rawMaclibSource = nil
+
+-- Fast load from disk cache
+if isfile and isfile(MacLibCacheFile) then
+    local ok, cached = pcall(readfile, MacLibCacheFile)
+    if ok and cached and #cached > 1000 then
+        rawMaclibSource = cached
+    end
+end
+
+-- Fallback to remote download
+if not rawMaclibSource then
+    local maclibSources = {
+        "https://github.com/biggaboy212/Maclib/releases/latest/download/maclib.txt",
+        "https://raw.githubusercontent.com/biggaboy212/Public-Resources/main/MacLib/maclib.lua"
+    }
+    for _, url in ipairs(maclibSources) do
+        local ok, res = pcall(function()
+            return game:HttpGet(url)
+        end)
+        if ok and res and #res > 1000 then
+            rawMaclibSource = res
+            if writefile then
+                pcall(writefile, MacLibCacheFile, res)
+            end
+            break
+        end
+    end
+end
+
+if not rawMaclibSource then
+    warn("[STRIX HUB] Failed to download or load Maclib UI Library source!")
     return
 end
 
-local EconomyRemotes   = RemotesFolder:WaitForChild("Economy", 15)
-local BuildingRemotes  = RemotesFolder:WaitForChild("Building", 15)
-local QuestsRemotes    = RemotesFolder:WaitForChild("Quests", 15)
-local EventGiftRemotes = RemotesFolder:WaitForChild("EventGift", 15)
+-- Patch 1: Single-Select Dropdown Reset Bug
+if rawMaclibSource:find("Selected = {}\r\n\t\t\t\t\t\t\tend") then
+    rawMaclibSource = rawMaclibSource:gsub("Selected = {}\r\n\t\t\t\t\t\t\tend", "if Selected[1] == optionName then Selected = {} end\r\n\t\t\t\t\t\t\tend", 1)
+elseif rawMaclibSource:find("Selected = {}\n\t\t\t\t\t\t\tend") then
+    rawMaclibSource = rawMaclibSource:gsub("Selected = {}\n\t\t\t\t\t\t\tend", "if Selected[1] == optionName then Selected = {} end\n\t\t\t\t\t\t\tend", 1)
+end
 
-local Remotes = {
-    CollectRequest        = EconomyRemotes and EconomyRemotes:WaitForChild("CollectRequest", 10),
-    RequestRestock        = BuildingRemotes and BuildingRemotes:WaitForChild("RequestRestock", 10),
-    RequestUnlockCell     = BuildingRemotes and BuildingRemotes:WaitForChild("RequestUnlockCell", 10),
-    UnlockCellResult      = BuildingRemotes and BuildingRemotes:WaitForChild("UnlockCellResult", 10),
-    RequestRepairBuilding = BuildingRemotes and BuildingRemotes:WaitForChild("RequestRepairBuilding", 10),
-    RepairResult          = BuildingRemotes and BuildingRemotes:WaitForChild("RepairResult", 10),
-    RequestQuestState     = QuestsRemotes and QuestsRemotes:WaitForChild("RequestQuestState", 10),
-    QuestState            = QuestsRemotes and QuestsRemotes:WaitForChild("QuestState", 10),
-    ClaimQuest            = QuestsRemotes and QuestsRemotes:WaitForChild("ClaimQuest", 10),
-    SkipQuest             = QuestsRemotes and QuestsRemotes:WaitForChild("SkipQuest", 10),
-    ClaimLegacy           = QuestsRemotes and QuestsRemotes:WaitForChild("ClaimLegacy", 10),
-    ClaimEventGift        = EventGiftRemotes and EventGiftRemotes:WaitForChild("Claim", 10),
-    EventGiftResult       = EventGiftRemotes and EventGiftRemotes:WaitForChild("ClaimResult", 10),
-}
+-- Patch 2: Dropdown Default Match Bug
+local patDefault = "isSelected = %(Settings%.Default == i%) and true or false"
+local replDefault = "isSelected = (Settings.Default == i or Settings.Default == v or (type(Settings.Default) == 'table' and table.find(Settings.Default, v) ~= nil)) and true or false"
+rawMaclibSource = rawMaclibSource:gsub(patDefault, replDefault)
 
--- Catalogs & Helpers
-local Catalogs = ReplicatedStorage:FindFirstChild("Catalogs")
-local EventGiftCatalog = Catalogs and Catalogs:FindFirstChild("EventGiftCatalog") and select(2, pcall(require, Catalogs.EventGiftCatalog)) or nil
-local QuestCatalog = Catalogs and Catalogs:FindFirstChild("QuestCatalog") and select(2, pcall(require, Catalogs.QuestCatalog)) or nil
+-- Patch 3: Dropdown UpdateSelection String Acceptance Bug
+local patUpdateSel = "function DropdownFunctions:UpdateSelection%(newSelection%)"
+local replUpdateSel = "function DropdownFunctions:UpdateSelection(newSelection)\n\t\t\t\t\t\tif type(newSelection) == 'string' then newSelection = { newSelection } end"
+rawMaclibSource = rawMaclibSource:gsub(patUpdateSel, replUpdateSel)
+
+-- Patch 4: Enable Smooth Scrolling on Dropdowns
+local patDropdownFrame = 'local dropdownFrame = Instance%.new%("Frame"%)\r?\n\t*dropdownFrame%.Name = "DropdownFrame"\r?\n\t*dropdownFrame%.BackgroundColor3 = Color3%.fromRGB%(255, 255, 255%)\r?\n\t*dropdownFrame%.BackgroundTransparency = 1\r?\n\t*dropdownFrame%.BorderColor3 = Color3%.fromRGB%(0, 0, 0%)\r?\n\t*dropdownFrame%.BorderSizePixel = 0\r?\n\t*dropdownFrame%.ClipsDescendants = true\r?\n\t*dropdownFrame%.Size = UDim2%.fromScale%(1, 1%)\r?\n\t*dropdownFrame%.Visible = false\r?\n\t*dropdownFrame%.AutomaticSize = Enum%.AutomaticSize%.Y'
+local replDropdownFrame = [[local dropdownFrame = Instance.new("ScrollingFrame")
+					dropdownFrame.Name = "DropdownFrame"
+					dropdownFrame.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+					dropdownFrame.BackgroundTransparency = 1
+					dropdownFrame.BorderColor3 = Color3.fromRGB(0, 0, 0)
+					dropdownFrame.BorderSizePixel = 0
+					dropdownFrame.ClipsDescendants = true
+					dropdownFrame.Position = UDim2.new(0, 0, 0, 38)
+					dropdownFrame.Size = UDim2.new(1, 0, 1, -38)
+					dropdownFrame.ScrollBarThickness = 3
+					dropdownFrame.ScrollBarImageColor3 = Color3.fromRGB(160, 160, 175)
+					dropdownFrame.ScrollBarImageTransparency = 0.4
+					dropdownFrame.ScrollingDirection = Enum.ScrollingDirection.Y
+					dropdownFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+					dropdownFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+					dropdownFrame.ElasticBehavior = Enum.ElasticBehavior.WhenScrollable
+					dropdownFrame.Visible = false]]
+rawMaclibSource = rawMaclibSource:gsub(patDropdownFrame, replDropdownFrame)
+
+local patDropdownPad = 'dropdownFrameUIPadding%.PaddingTop = UDim%.new%(0, 38%)\r?\n\t*dropdownFrameUIPadding%.PaddingBottom = UDim%.new%(0, 10%)'
+local replDropdownPad = 'dropdownFrameUIPadding.PaddingTop = UDim.new(0, 4)\n\t\t\t\t\tdropdownFrameUIPadding.PaddingBottom = UDim.new(0, 8)\n\t\t\t\t\tdropdownFrameUIPadding.PaddingRight = UDim.new(0, 5)'
+rawMaclibSource = rawMaclibSource:gsub(patDropdownPad, replDropdownPad)
+
+local patCalcSize = 'local function CalculateDropdownSize%(%)\r?\n\t*local totalHeight = 0\r?\n\t*local visibleChildrenCount = 0\r?\n\t*local padding = dropdownFrameUIPadding%.PaddingTop%.Offset %+ dropdownFrameUIPadding%.PaddingBottom%.Offset\r?\n\r?\n\t*for _, v in pairs%(dropdownFrame:GetChildren%(%)%) do\r?\n\t*if not v:IsA%("UIComponent"%) and v%.Visible then\r?\n\t*totalHeight %+= v%.AbsoluteSize%.Y\r?\n\t*visibleChildrenCount %+= 1\r?\n\t*end\r?\n\t*end\r?\n\r?\n\t*local spacing = dropdownFrameUIListLayout%.Padding%.Offset %* %(visibleChildrenCount %- 1%)\r?\n\r?\n\t*return totalHeight %+ spacing %+ padding\r?\n\t*end'
+local replCalcSize = [[local function CalculateDropdownSize()
+						local totalHeight = 0
+						local visibleChildrenCount = 0
+						local padding = dropdownFrameUIPadding.PaddingTop.Offset + dropdownFrameUIPadding.PaddingBottom.Offset
+
+						for _, v in pairs(dropdownFrame:GetChildren()) do
+							if not v:IsA("UIComponent") and v.Visible then
+								totalHeight += v.AbsoluteSize.Y
+								visibleChildrenCount += 1
+							end
+						end
+
+						local spacing = dropdownFrameUIListLayout.Padding.Offset * math.max(0, visibleChildrenCount - 1)
+						local contentHeight = totalHeight + spacing + padding
+						local fullDropdownHeight = 38 + contentHeight
+						local maxDropdownHeight = 210
+
+						if dropdownFrame:IsA("ScrollingFrame") then
+							dropdownFrame.ScrollBarThickness = (fullDropdownHeight > maxDropdownHeight) and 3 or 0
+						end
+
+						return math.min(fullDropdownHeight, maxDropdownHeight)
+					end]]
+rawMaclibSource = rawMaclibSource:gsub(patCalcSize, replCalcSize)
+
+-- Patch 5: Slider Min/Max Arithmetic Nil Bug
+local patSliderMinMax = "function SectionFunctions:Slider%(Settings, Flag%)"
+local replSliderMinMax = "function SectionFunctions:Slider(Settings, Flag)\n\t\t\t\t\tSettings.Minimum = Settings.Minimum or Settings.Min or 0\n\t\t\t\t\tSettings.Maximum = Settings.Maximum or Settings.Max or 100"
+rawMaclibSource = rawMaclibSource:gsub(patSliderMinMax, replSliderMinMax)
+
+-- Patch 6: Responsive Content Gap Bug
+rawMaclibSource = rawMaclibSource:gsub(
+    "content%.Size = UDim2%.new%(0, %(base%.AbsoluteSize%.X %- sidebar%.AbsoluteSize%.X%), 1, 0%)",
+    "content.Size = UDim2.new(1 - sidebar.Size.X.Scale, -sidebar.Size.X.Offset, 1, 0)"
+)
+rawMaclibSource = rawMaclibSource:gsub(
+    "content%.Size = UDim2%.new%(0, base%.AbsoluteSize%.X %- newSidebarWidth, 1, 0%)",
+    "content.Size = UDim2.new(1, -newSidebarWidth, 1, 0)"
+)
+
+-- Patch 7: Distinct Dividers
+local patDivLine = "line%.BackgroundColor3 = Color3%.fromRGB%(255, 255, 255%)\r?\n\t*line%.BackgroundTransparency = 0%.9\r?\n\t*line%.BorderColor3 = Color3%.fromRGB%(0, 0, 0%)\r?\n\t*line%.BorderSizePixel = 0\r?\n\t*line%.Size = UDim2%.new%(1, 0, 0, 1%)"
+local replDivLine = "line.BackgroundColor3 = Color3.fromRGB(255, 255, 255)\n\t\t\t\t\tline.BackgroundTransparency = 0.68\n\t\t\t\t\tline.BorderSizePixel = 0\n\t\t\t\t\tline.Size = UDim2.new(1, 0, 0, 1)"
+rawMaclibSource = rawMaclibSource:gsub(patDivLine, replDivLine)
+
+-- Patch 8: Safe Tween Engine Wrapper
+local patTween = "local function Tween%(instance, tweeninfo, propertytable%)\r?\n\t*return TweenService:Create%(instance, tweeninfo, propertytable%)\r?\nend"
+local replTween = [[local function Tween(instance, tweeninfo, propertytable)
+	local ok, tw = pcall(function()
+		return TweenService:Create(instance, tweeninfo, propertytable)
+	end)
+	if ok and tw then
+		return tw
+	end
+	pcall(function()
+		if instance and propertytable then
+			for prop, val in pairs(propertytable) do
+				instance[prop] = val
+			end
+		end
+	end)
+	return {
+		Play = function() end,
+		Stop = function() end,
+		Cancel = function() end,
+		Pause = function() end,
+		Completed = {
+			Connect = function() return { Disconnect = function() end } end,
+			Wait = function() end
+		}
+	}
+end]]
+rawMaclibSource = rawMaclibSource:gsub(patTween, replTween)
+
+-- Patch 9: Keybind Blacklist Typo Crash Bug
+rawMaclibSource = rawMaclibSource:gsub(
+    "KeybindFunctions%.KeybindFunctions%.Settings%.Blacklist",
+    "KeybindFunctions.Settings.Blacklist"
+)
+
+-- Patch 10: Clean Keybind Management & Leak Prevention
+local patKeybindBlock = 'local MenuKeybind = Settings%.Keybind or Enum%.KeyCode%.RightControl.-UserInputService%.InputEnded:Connect%(function%(inp, gpe%)\r?\n\t*if gpe then return end\r?\n\t*if inp%.KeyCode == MenuKeybind then\r?\n\t*ToggleMenu%(%)\r?\n\t*end\r?\n\t*end%)'
+local replKeybindBlock = [[local MenuKeybind = Settings.Keybind or Enum.KeyCode.RightControl
+
+	local function ToggleMenu()
+		if unloaded then return end
+		local state = not WindowFunctions:GetState()
+		WindowFunctions:SetState(state)
+	end
+
+	if getgenv().STRIX_KEYBIND_CON then
+		pcall(function() getgenv().STRIX_KEYBIND_CON:Disconnect() end)
+		getgenv().STRIX_KEYBIND_CON = nil
+	end
+
+	local keybindCon = UserInputService.InputEnded:Connect(function(inp, gpe)
+		if gpe then return end
+		if UserInputService:GetFocusedTextBox() then return end
+		if unloaded then return end
+		local isMatched = false
+		if typeof(MenuKeybind) == "EnumItem" then
+			if inp.KeyCode == MenuKeybind and MenuKeybind ~= Enum.KeyCode.Unknown then
+				isMatched = true
+			elseif inp.UserInputType == MenuKeybind then
+				isMatched = true
+			end
+		end
+		if isMatched then
+			ToggleMenu()
+		end
+	end)
+	getgenv().STRIX_KEYBIND_CON = keybindCon]]
+rawMaclibSource = rawMaclibSource:gsub(patKeybindBlock, replKeybindBlock, 1)
+
+MacLib = loadstring(rawMaclibSource)()
+_G.MacLib = MacLib
 
 -- ==============================================================================
 -- 3. STATE & CONFIGURATION MANAGEMENT
 -- ==============================================================================
-local ConfigFolder = "STRIX HUB/Mini City Wars"
-local ConfigFile = ConfigFolder .. "/" .. tostring(LocalPlayer.Name) .. ".json"
-
-local function EnsureFolders()
-    if isfolder and not isfolder("STRIX HUB") then pcall(makefolder, "STRIX HUB") end
-    if isfolder and not isfolder(ConfigFolder) then pcall(makefolder, ConfigFolder) end
-end
-EnsureFolders()
-
 local State = {
-    -- Automations
-    AutoCollectCash = true,
-    CollectInterval = 1.0,
+    -- Cash Automation
+    AutoCollectCash = false,
 
-    
-    AutoUnlockLand = false,
-    UnlockInterval = 2.0,
-    
-    AutoRepair = true,
-    RepairInterval = 2.0,
-    
-    AutoClaimDailyQuests = true,
-    AutoClaimLegacyMilestones = true,
-    AutoClaimEventGifts = true,
-    QuestsPollInterval = 5.0,
+    -- Repair Automation
+    AutoRepair = false,
 
-    -- UI & System Settings
-    AcrylicBlur = false,
-    ShowUserInfo = true,
-    MobileToggle = true,
+    -- Quests Automation
+    AutoClaimQuests = false,
+
+    -- Interface Settings
     Keybind = Enum.KeyCode.RightControl,
-    UISize = { Width = 868, Height = 650 }
+    UISize = { Width = 868, Height = 650 },
+    AcrylicBlur = true,
+    ShowUserInfo = true,
+    MobileToggle = true
 }
 
+-- Keybind String Resolver
 local function ResolveBind(bindName)
     if not bindName or bindName == "Unknown" or bindName == "None" then return nil end
     local okKey, k = pcall(function() return Enum.KeyCode[bindName] end)
@@ -203,7 +538,7 @@ local function ResolveBind(bindName)
     return nil
 end
 
--- Pre-load Config from disk
+-- Pre-load Config from Disk before Window Creation (Prevents UI Glitch)
 if isfile and isfile(ConfigFile) then
     local okRead, content = pcall(readfile, ConfigFile)
     if okRead and content and #content > 2 then
@@ -222,131 +557,87 @@ if isfile and isfile(ConfigFile) then
 end
 
 local isLoadingConfig = false
+local saveDebounce = false
+
 local function SaveConfig()
     if not isScriptRunning or isLoadingConfig then return end
     EnsureFolders()
-    
+
+    local keybindStr = "RightControl"
+    if typeof(State.Keybind) == "EnumItem" then
+        keybindStr = State.Keybind.Name
+    elseif type(State.Keybind) == "string" and State.Keybind ~= "" then
+        keybindStr = State.Keybind
+    end
+
     local payload = {}
     for k, v in pairs(State) do
-        if typeof(v) == "EnumItem" then
-            payload[k] = v.Name
-        else
-            payload[k] = v
-        end
+        payload[k] = v
     end
-    
-    pcall(function()
-        if writefile then
-            writefile(ConfigFile, HttpService:JSONEncode(payload))
-        end
-    end)
+    payload.Keybind = keybindStr
+
+    local okEnc, encoded = pcall(function() return HttpService:JSONEncode(payload) end)
+    if okEnc and encoded and writefile then
+        pcall(writefile, ConfigFile, encoded)
+    end
 end
 
-local saveDebounce = false
 local function SaveConfigDebounced()
-    if saveDebounce then return end
+    if not isScriptRunning or isLoadingConfig or saveDebounce then return end
     saveDebounce = true
     task.delay(0.5, function()
         saveDebounce = false
-        SaveConfig()
+        if isScriptRunning and not isLoadingConfig then SaveConfig() end
     end)
 end
 
--- ==============================================================================
--- 4. MACLIB UI LOADING & 7 ESSENTIAL REGEX PATCHES
--- ==============================================================================
-local MacLib = nil
-local MacLibCacheFile = "STRIX HUB/maclib_cache.lua"
-local rawMaclibSource = nil
+-- Periodic Auto-Save
+task.spawn(function()
+    while isScriptRunning do
+        task.wait(10)
+        if not isScriptRunning then break end
+        if not isLoadingConfig then SaveConfig() end
+    end
+end)
 
-if isfile and isfile(MacLibCacheFile) then
-    local ok, cached = pcall(readfile, MacLibCacheFile)
-    if ok and cached and #cached > 1000 then
-        rawMaclibSource = cached
+pcall(function()
+    game:BindToClose(function()
+        isScriptRunning = false
+        pcall(SaveConfig)
+    end)
+end)
+
+-- ==============================================================================
+-- 4. ANTI-AFK SYSTEM
+-- ==============================================================================
+if getconnections then
+    for _, c in getconnections(LocalPlayer.Idled) do
+        pcall(function() c:Disable(); c:Disconnect() end)
     end
 end
 
-if not rawMaclibSource then
-    local maclibSources = {
-        "https://github.com/biggaboy212/Maclib/releases/latest/download/maclib.txt",
-        "https://raw.githubusercontent.com/biggaboy212/Public-Resources/main/MacLib/maclib.lua"
-    }
-    for _, url in ipairs(maclibSources) do
-        local ok, res = pcall(function() return game:HttpGet(url) end)
-        if ok and res and #res > 1000 then
-            rawMaclibSource = res
-            if writefile then pcall(writefile, MacLibCacheFile, res) end
-            break
-        end
-    end
-end
-
-if not rawMaclibSource then
-    warn("[STRIX HUB] Failed to download or load Maclib UI Library!")
-    return
-end
-
--- Patch 1: Single-Select Dropdown Reset Bug
-if rawMaclibSource:find("Selected = {}\r\n\t\t\t\t\t\t\tend") then
-    rawMaclibSource = rawMaclibSource:gsub("Selected = {}\r\n\t\t\t\t\t\t\tend", "if Selected[1] == optionName then Selected = {} end\r\n\t\t\t\t\t\t\tend", 1)
-elseif rawMaclibSource:find("Selected = {}\n\t\t\t\t\t\t\tend") then
-    rawMaclibSource = rawMaclibSource:gsub("Selected = {}\n\t\t\t\t\t\t\tend", "if Selected[1] == optionName then Selected = {} end\n\t\t\t\t\t\t\tend", 1)
-end
-
--- Patch 2: Allow Dropdown Settings.Default to match strings, numbers, or tables
-local patDefault = "isSelected = %(Settings%.Default == i%) and true or false"
-local replDefault = "isSelected = (Settings.Default == i or Settings.Default == v or (type(Settings.Default) == 'table' and table.find(Settings.Default, v) ~= nil)) and true or false"
-rawMaclibSource = rawMaclibSource:gsub(patDefault, replDefault)
-
--- Patch 3: Allow Dropdown UpdateSelection to accept string values directly
-local patUpdateSel = "function DropdownFunctions:UpdateSelection%(newSelection%)"
-local replUpdateSel = "function DropdownFunctions:UpdateSelection(newSelection)\n\t\t\t\t\t\tif type(newSelection) == 'string' then newSelection = { newSelection } end"
-rawMaclibSource = rawMaclibSource:gsub(patUpdateSel, replUpdateSel)
-
--- Patch 4: Slider Minimum/Maximum arithmetic nil bug
-local patSliderMinMax = "function SectionFunctions:Slider%(Settings, Flag%)"
-local replSliderMinMax = "function SectionFunctions:Slider(Settings, Flag)\n\t\t\t\t\tSettings.Minimum = Settings.Minimum or Settings.Min or 0\n\t\t\t\t\tSettings.Maximum = Settings.Maximum or Settings.Max or 100"
-rawMaclibSource = rawMaclibSource:gsub(patSliderMinMax, replSliderMinMax)
-
--- Patch 5: Responsive Content sizing (prevent double-scale gap)
-rawMaclibSource = rawMaclibSource:gsub(
-    "content%.Size = UDim2%.new%(0, %(base%.AbsoluteSize%.X %- sidebar%.AbsoluteSize%.X%), 1, 0%)",
-    "content.Size = UDim2.new(1 - sidebar.Size.X.Scale, -sidebar.Size.X.Offset, 1, 0)"
-)
-rawMaclibSource = rawMaclibSource:gsub(
-    "content%.Size = UDim2%.new%(0, base%.AbsoluteSize%.X %- newSidebarWidth, 1, 0%)",
-    "content.Size = UDim2.new(1, -newSidebarWidth, 1, 0)"
-)
-
--- Patch 6: Clear & Distinct Section Dividers
-local patDivLine = "line%.BackgroundColor3 = Color3%.fromRGB%(255, 255, 255%)\r?\n\t*line%.BackgroundTransparency = 0%.9\r?\n\t*line%.BorderColor3 = Color3%.fromRGB%(0, 0, 0%)\r?\n\t*line%.BorderSizePixel = 0\r?\n\t*line%.Size = UDim2%.new%(1, 0, 0, 1%)"
-local replDivLine = "line.BackgroundColor3 = Color3.fromRGB(255, 255, 255)\n\t\t\t\t\tline.BackgroundTransparency = 0.68\n\t\t\t\t\tline.BorderSizePixel = 0\n\t\t\t\t\tline.Size = UDim2.new(1, 0, 0, 1)"
-rawMaclibSource = rawMaclibSource:gsub(patDivLine, replDivLine)
-
--- Patch 7: TweenService Thread Capability & Protected Hierarchy Crash
-local patTween = "local function Tween%(instance, tweeninfo, propertytable%)\r?\n\t*return TweenService:Create%(instance, tweeninfo, propertytable%)\r?\nend"
-local replTween = [[local function Tween(instance, tweeninfo, propertytable)
-    local ok, tw = pcall(function() return TweenService:Create(instance, tweeninfo, propertytable) end)
-    if ok and tw then return tw end
+local function SendAntiAfkInput()
     pcall(function()
-        if instance and propertytable then
-            for prop, val in pairs(propertytable) do instance[prop] = val end
-        end
+        local vim = Instance.new("VirtualInputManager")
+        vim:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+        vim:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+        vim:Destroy()
     end)
-    return { Play = function() end, Stop = function() end, Cancel = function() end, Pause = function() end, Completed = { Connect = function() return { Disconnect = function() end } end, Wait = function() end } }
-end]]
-rawMaclibSource = rawMaclibSource:gsub(patTween, replTween)
-
-local loadedLib, loadErr = loadstring(rawMaclibSource)
-if not loadedLib then
-    warn("[STRIX HUB] Failed to compile patched Maclib: " .. tostring(loadErr))
-    return
 end
 
-MacLib = loadedLib()
+local antiAfkCon = LocalPlayer.Idled:Connect(SendAntiAfkInput)
+getgenv().STRIX_ANTI_AFK_CON = antiAfkCon
+
+task.spawn(function()
+    while isScriptRunning do
+        task.wait(300)
+        if not isScriptRunning then break end
+        SendAntiAfkInput()
+    end
+end)
 
 -- ==============================================================================
--- 5. WINDOW CREATION & DIRECTX CRASH BYPASS
+-- 5. WINDOW INITIALIZATION & DIRECTX CRASH PREVENTION
 -- ==============================================================================
 local Window = MacLib:Window({
     Title = "STRIX HUB",
@@ -358,10 +649,17 @@ local Window = MacLib:Window({
     Keybind = (State.Keybind and State.Keybind ~= Enum.KeyCode.Unknown) and State.Keybind or Enum.KeyCode.RightControl
 })
 
--- Completely disable MacLib notifications to prevent CanvasGroup DirectX crashes
+-- Completely disable MacLib notifications to prevent CanvasGroup DirectX device lost crashes
 Window:SetNotificationsState(false)
 
--- Neutralize Dialog to prevent CanvasGroup modal crashes
+-- Safe Window Unload hook
+if Window.onUnloaded then
+    Window.onUnloaded(function()
+        if getgenv().STRIX_HUB_CLEANUP then pcall(getgenv().STRIX_HUB_CLEANUP) end
+    end)
+end
+
+-- Neutralize Maclib's Dialog to prevent CanvasGroup creation
 Window.Dialog = function(self, dialogSettings)
     if dialogSettings and dialogSettings.Buttons then
         for _, btn in ipairs(dialogSettings.Buttons) do
@@ -371,18 +669,18 @@ Window.Dialog = function(self, dialogSettings)
             end
         end
     end
-    return { UpdateTitle = function() end, UpdateDescription = function() end, Cancel = function() end }
-end
-
-if Window.onUnloaded then
-    Window.onUnloaded(function()
-        if getgenv().STRIX_HUB_CLEANUP then pcall(getgenv().STRIX_HUB_CLEANUP) end
-    end)
+    return {
+        UpdateTitle = function() end,
+        UpdateDescription = function() end,
+        Cancel = function() end,
+    }
 end
 
 -- ==============================================================================
--- 6. RESPONSIVE SCREEN AUTO-SCALE & DRAG-TO-RESIZE
+-- 6. RESPONSIVE SCREEN AUTO-SCALE & DRAG-TO-RESIZE ENGINE
 -- ==============================================================================
+local UpdateResponsiveScaleRef = nil
+
 local function SetupWindowResize()
     local targetScreenGui
     local parent = (gethui and gethui()) or game:GetService("CoreGui")
@@ -422,6 +720,7 @@ local function SetupWindowResize()
     end
     EnforceFrameLayout()
 
+    -- Clean Exit Button replacement
     local exitBtn = base:FindFirstChild("Exit", true)
     if exitBtn and exitBtn:IsA("TextButton") then
         local p = exitBtn.Parent
@@ -549,6 +848,8 @@ local function SetupWindowResize()
         end
     end
 
+    UpdateResponsiveScaleRef = UpdateResponsiveScale
+
     local resizeConnections = {}
     local function CleanResizeConnections()
         for _, c in ipairs(resizeConnections) do
@@ -578,11 +879,19 @@ local function SetupWindowResize()
     if camera then
         table.insert(resizeConnections, camera:GetPropertyChangedSignal("ViewportSize"):Connect(SafeTriggerResize))
     end
+    table.insert(resizeConnections, workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+        local newCam = workspace.CurrentCamera
+        if newCam then
+            table.insert(resizeConnections, newCam:GetPropertyChangedSignal("ViewportSize"):Connect(SafeTriggerResize))
+        end
+        SafeTriggerResize()
+    end))
 
     local startMousePos
     local startOffsetSize
     local startPos
 
+    -- Corner Handle (Bottom-Right)
     local corner = Instance.new("Frame")
     corner.Name = "ResizeHandle_Corner"
     corner.AnchorPoint = Vector2.new(1, 1)
@@ -611,6 +920,7 @@ local function SetupWindowResize()
     cornerBtn.ZIndex = 102
     cornerBtn.Parent = corner
 
+    -- Right Edge Handle
     local rightEdge = Instance.new("TextButton")
     rightEdge.Name = "ResizeHandle_Right"
     rightEdge.AnchorPoint = Vector2.new(1, 0)
@@ -621,6 +931,7 @@ local function SetupWindowResize()
     rightEdge.ZIndex = 99
     rightEdge.Parent = base
 
+    -- Bottom Edge Handle
     local bottomEdge = Instance.new("TextButton")
     bottomEdge.Name = "ResizeHandle_Bottom"
     bottomEdge.AnchorPoint = Vector2.new(0, 1)
@@ -737,364 +1048,363 @@ local function CreateMobileToggleButton()
     local mobileGui = Instance.new("ScreenGui")
     mobileGui.Name = "STRIX_MOBILE_TOGGLE"
     mobileGui.ResetOnSpawn = false
-    mobileGui.DisplayOrder = 999999
+    mobileGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    pcall(function() mobileGui.DisplayOrder = 999999 end)
+
     pcall(function() mobileGui.Parent = h end)
-    if not mobileGui.Parent then mobileGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+    if not mobileGui.Parent then
+        mobileGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+    end
     getgenv().STRIX_MOBILE_GUI = mobileGui
 
-    local btn = Instance.new("ImageButton", mobileGui)
-    btn.Name = "FloatingButton"
-    btn.Size = UDim2.fromOffset(46, 46)
-    btn.Position = UDim2.new(0, 15, 0, 140)
-    btn.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
-    btn.BackgroundTransparency = 0.15
-    btn.Active = true
+    local buttonFrame = Instance.new("ImageButton")
+    buttonFrame.Name = "FloatingButton"
+    buttonFrame.Size = UDim2.fromOffset(46, 46)
+    buttonFrame.Position = UDim2.new(0, 15, 0, 140)
+    buttonFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+    buttonFrame.BackgroundTransparency = 0.15
+    buttonFrame.BorderSizePixel = 0
+    buttonFrame.AutoButtonColor = false
+    buttonFrame.ZIndex = 1000
+    buttonFrame.Active = true
+    buttonFrame.Parent = mobileGui
 
-    local corner = Instance.new("UICorner", btn)
+    local corner = Instance.new("UICorner")
     corner.CornerRadius = UDim.new(0, 14)
+    corner.Parent = buttonFrame
 
-    local stroke = Instance.new("UIStroke", btn)
+    local stroke = Instance.new("UIStroke")
+    stroke.Name = "BorderStroke"
     stroke.Color = Color3.fromRGB(0, 170, 255)
     stroke.Thickness = 1.4
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    stroke.Parent = buttonFrame
 
-    local icon = Instance.new("ImageLabel", btn)
+    local icon = Instance.new("ImageLabel")
+    icon.Name = "Icon"
     icon.Size = UDim2.fromOffset(26, 26)
-    icon.Position = UDim2.fromScale(0.5, 0.5)
+    icon.Position = UDim2.new(0.5, 0, 0.5, 0)
     icon.AnchorPoint = Vector2.new(0.5, 0.5)
     icon.BackgroundTransparency = 1
     icon.Image = "rbxassetid://10709782230"
+    icon.ImageColor3 = Color3.fromRGB(255, 255, 255)
+    icon.ZIndex = 1001
+    icon.Parent = buttonFrame
 
-    local statusDot = Instance.new("Frame", btn)
+    local statusDot = Instance.new("Frame")
+    statusDot.Name = "StatusDot"
     statusDot.Size = UDim2.fromOffset(8, 8)
     statusDot.Position = UDim2.new(1, -5, 0, 5)
     statusDot.AnchorPoint = Vector2.new(1, 0)
     statusDot.BackgroundColor3 = Color3.fromRGB(0, 230, 130)
-    Instance.new("UICorner", statusDot).CornerRadius = UDim.new(1, 0)
+    statusDot.BorderSizePixel = 0
+    statusDot.ZIndex = 1002
+    statusDot.Parent = buttonFrame
+
+    local dotCorner = Instance.new("UICorner")
+    dotCorner.CornerRadius = UDim.new(1, 0)
+    dotCorner.Parent = statusDot
+
+    local dotStroke = Instance.new("UIStroke")
+    dotStroke.Color = Color3.fromRGB(20, 20, 24)
+    dotStroke.Thickness = 1.2
+    dotStroke.Parent = statusDot
 
     local function UpdateVisuals(isOpen)
-        stroke.Color = isOpen and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(65, 65, 75)
-        statusDot.BackgroundColor3 = isOpen and Color3.fromRGB(0, 230, 130) or Color3.fromRGB(255, 80, 80)
-        icon.ImageTransparency = isOpen and 0 or 0.2
+        if isOpen then
+            stroke.Color = Color3.fromRGB(0, 170, 255)
+            statusDot.BackgroundColor3 = Color3.fromRGB(0, 230, 130)
+            icon.ImageColor3 = Color3.fromRGB(255, 255, 255)
+            icon.ImageTransparency = 0
+        else
+            stroke.Color = Color3.fromRGB(65, 65, 75)
+            statusDot.BackgroundColor3 = Color3.fromRGB(255, 80, 80)
+            icon.ImageColor3 = Color3.fromRGB(180, 180, 190)
+            icon.ImageTransparency = 0.2
+        end
     end
 
-    btn.Activated:Connect(function()
-        local cur = Window:GetState()
-        Window:SetState(not cur)
-        UpdateVisuals(not cur)
+    if Window and Window.GetState then
+        UpdateVisuals(Window:GetState())
+    end
+
+    task.spawn(function()
+        while isScriptRunning and mobileGui and mobileGui.Parent do
+            local curState = false
+            if Window and Window.GetState then
+                curState = Window:GetState()
+            end
+            UpdateVisuals(curState)
+            task.wait(0.25)
+        end
     end)
+
+    local function SafeToggle()
+        if Window and Window.GetState and Window.SetState then
+            local nextState = not Window:GetState()
+            Window:SetState(nextState)
+            UpdateVisuals(nextState)
+        end
+    end
+
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+    local hasMoved = false
+
+    buttonFrame.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            hasMoved = false
+            dragStart = input.Position
+            startPos = buttonFrame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                end
+            end)
+        end
+    end)
+
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            if math.abs(delta.X) > 4 or math.abs(delta.Y) > 4 then
+                hasMoved = true
+            end
+            local cam = workspace.CurrentCamera
+            local viewSize = (cam and cam.ViewportSize) or Vector2.new(1280, 720)
+            local targetX = math.clamp(startPos.X.Offset + delta.X, 5, math.max(5, viewSize.X - 52))
+            local targetY = math.clamp(startPos.Y.Offset + delta.Y, 5, math.max(5, viewSize.Y - 52))
+            buttonFrame.Position = UDim2.new(0, targetX, 0, targetY)
+        end
+    end)
+
+    buttonFrame.Activated:Connect(function()
+        if not hasMoved then
+            SafeToggle()
+        end
+    end)
+
+    if State.MobileToggle == false then
+        mobileGui.Enabled = false
+    end
+
     return mobileGui
 end
 task.spawn(CreateMobileToggleButton)
 
 -- ==============================================================================
--- 8. GAME HELPERS & LOGIC ENGINES
--- ==============================================================================
-local function GetPlayerPlot()
-    local plots = workspace:FindFirstChild("Plots")
-    if not plots then return nil end
-    local myUserId = LocalPlayer.UserId
-    
-    for _, plot in ipairs(plots:GetChildren()) do
-        if plot:GetAttribute("OwnerId") == myUserId then
-            return plot
-        end
-        local buildings = plot:FindFirstChild("Buildings")
-        if buildings then
-            for _, b in ipairs(buildings:GetChildren()) do
-                if b:GetAttribute("OwnerId") == myUserId then
-                    return plot
-                end
-            end
-        end
-    end
-    return nil
-end
-
--- 1. Collect Cash from all player's buildings
-local function CollectCashOnce()
-    local plot = GetPlayerPlot()
-    if not plot then return 0, 0 end
-    local buildings = plot:FindFirstChild("Buildings")
-    if not buildings then return 0, 0 end
-
-    local collectedCount = 0
-    local totalPending = 0
-
-    for _, b in ipairs(buildings:GetChildren()) do
-        local pending = tonumber(b:GetAttribute("PendingCash")) or 0
-        if pending >= 1 then
-            pcall(function()
-                Remotes.CollectRequest:FireServer(b)
-            end)
-            collectedCount = collectedCount + 1
-            totalPending = totalPending + pending
-        end
-    end
-    return collectedCount, totalPending
-end
-
-
--- 3. Unlock Land (Locked tiles in player's plot)
-local function UnlockLandOnce()
-    local plot = GetPlayerPlot()
-    if not plot then return false end
-    local cells = plot:FindFirstChild("Cells")
-    if not cells then return false end
-
-    local currentCash = tonumber(LocalPlayer:GetAttribute("WalletCash")) or 0
-
-    for _, c in ipairs(cells:GetChildren()) do
-        if c.Name:sub(1, 11) == "LockedTile_" then
-            local ux = c:GetAttribute("TileUX")
-            local uz = c:GetAttribute("TileUZ")
-            if ux and uz then
-                local prompt = c:FindFirstChildOfClass("ProximityPrompt")
-                local cost = 3200
-                if prompt and prompt.ActionText then
-                    local num = prompt.ActionText:match("%$(%d+)")
-                    if num then cost = tonumber(num) or 3200 end
-                end
-
-                if currentCash >= cost then
-                    pcall(function()
-                        Remotes.RequestUnlockCell:FireServer(ux, uz)
-                    end)
-                    return true -- unlock 1 per tick to ensure smooth sync
-                end
-            end
-        end
-    end
-    return false
-end
-
--- 4. Repair Ruined Buildings & Walls
-local function RepairRuinsOnce()
-    -- Skip if base is under attack (game server locks repairs during raids)
-    if LocalPlayer:GetAttribute("UnderRaid") == true then
-        return 0
-    end
-
-    local plot = GetPlayerPlot()
-    if not plot then return 0 end
-    local repairedCount = 0
-
-    local foldersToCheck = {
-        plot:FindFirstChild("Buildings"),
-        plot:FindFirstChild("Walls")
-    }
-
-    for _, folder in ipairs(foldersToCheck) do
-        if folder then
-            for _, item in ipairs(folder:GetChildren()) do
-                if item:GetAttribute("IsRubble") == true or item:FindFirstChild("RepairPrompt") then
-                    pcall(function()
-                        Remotes.RequestRepairBuilding:FireServer(item)
-                    end)
-                    repairedCount = repairedCount + 1
-                end
-            end
-        end
-    end
-    return repairedCount
-end
-
--- 5 & 6. Quests Cache & Handler
-local cachedQuestState = nil
-
-local function HandleQuestState(state)
-    if type(state) ~= "table" then return end
-    cachedQuestState = state
-
-    -- Auto Claim Daily Quests
-    if State.AutoClaimDailyQuests and state.daily and type(state.daily) == "table" then
-        for _, q in ipairs(state.daily) do
-            if type(q) == "table" and q.done == true and q.slot then
-                pcall(function()
-                    Remotes.ClaimQuest:FireServer(q.slot)
-                end)
-            end
-        end
-    end
-
-    -- Auto Claim Legacy Milestones
-    if State.AutoClaimLegacyMilestones and state.legacy and type(state.legacy) == "table" then
-        for _, l in ipairs(state.legacy) do
-            if type(l) == "table" and l.done == true and l.id then
-                pcall(function()
-                    Remotes.ClaimLegacy:FireServer(l.id)
-                end)
-            end
-        end
-    end
-end
-
-if Remotes.QuestState then
-    table.insert(scriptConnections, Remotes.QuestState.OnClientEvent:Connect(function(state)
-        if not isScriptRunning then return end
-        HandleQuestState(state)
-    end))
-end
-
--- 7. Event Gifts
-local function ClaimEventGiftOnce()
-    local giftId = LocalPlayer:GetAttribute("EventGift")
-    if not giftId and EventGiftCatalog and EventGiftCatalog.current then
-        local cur = EventGiftCatalog.current(os.time())
-        if cur and cur.id then giftId = cur.id end
-    end
-
-    if giftId and Remotes.ClaimEventGift then
-        pcall(function()
-            Remotes.ClaimEventGift:FireServer(giftId)
-        end)
-    end
-end
-
-table.insert(scriptConnections, LocalPlayer:GetAttributeChangedSignal("EventGift"):Connect(function()
-    if not isScriptRunning or not State.AutoClaimEventGifts then return end
-    ClaimEventGiftOnce()
-end))
-
--- Trigger repairs immediately when a raid/attack finishes
-table.insert(scriptConnections, LocalPlayer:GetAttributeChangedSignal("UnderRaid"):Connect(function()
-    if not isScriptRunning or not State.AutoRepair then return end
-    if LocalPlayer:GetAttribute("UnderRaid") ~= true then
-        task.delay(0.5, function()
-            if isScriptRunning and State.AutoRepair then
-                pcall(RepairRuinsOnce)
-            end
-        end)
-    end
-end))
-
--- ==============================================================================
--- 9. TAB HIERARCHY & 2-COLUMN SECTION LAYOUT
+-- 8. UI TAB STRUCTURE & FEATURES
 -- ==============================================================================
 local TabGroup = Window:TabGroup()
 
 local Tabs = {
-    Main = TabGroup:Tab({ Name = "Main / Auto", Image = "rbxassetid://10709782230" }),
-    Settings = TabGroup:Tab({ Name = "Settings", Image = "rbxassetid://10734950309" })
+    Main = TabGroup:Tab({ Name = "Main", Image = "rbxassetid://10709782230" }), -- lucide-home
+    Quests = TabGroup:Tab({ Name = "Quests", Image = "rbxassetid://10734966248" }), -- lucide-star
+    Settings = TabGroup:Tab({ Name = "Settings", Image = "rbxassetid://10734950309" }) -- lucide-settings
 }
 
+-- ------------------------------------------------------------------------------
+-- TAB 1: MAIN
+-- ------------------------------------------------------------------------------
 local MainSections = {
-    LeftSection = Tabs.Main:Section({ Side = "Left" }),
-    RightSection = Tabs.Main:Section({ Side = "Right" })
+    Cash = Tabs.Main:Section({ Side = "Left" }),
+    Repair = Tabs.Main:Section({ Side = "Left" }),
+    Stats = Tabs.Main:Section({ Side = "Right" })
 }
 
--- Left Column: Economy & Building Automations
-MainSections.LeftSection:Header({ Text = "Economy & City Automations" })
+-- [Menu] Cash
+MainSections.Cash:Header({ Text = "Cash" })
 
-MainSections.LeftSection:Toggle({
-    Name = "Auto Collect Cash",
+MainSections.Cash:Toggle({
+    Name = "Auto Collect",
     Default = (State.AutoCollectCash == true),
-    Callback = function(v)
-        State.AutoCollectCash = v
+    Callback = function(val)
+        State.AutoCollectCash = val
         SaveConfigDebounced()
     end
 }, "Toggle_AutoCollectCash")
 
-MainSections.LeftSection:Slider({
-    Name = "Collect Interval (s)",
-    Min = 0.5,
-    Max = 5.0,
-    Precision = 1,
-    Default = State.CollectInterval or 1.0,
-    Callback = function(v)
-        State.CollectInterval = v
-        SaveConfigDebounced()
+MainSections.Cash:Button({
+    Name = "Collect Cash Now",
+    Callback = function()
+        local collected = CollectCashFromBuildings()
+        if Window and Window.Notify then
+            Window:Notify({
+                Title = "Cash Collected",
+                Description = ("Collected pending cash from %d building(s)"):format(collected),
+                Lifetime = 3
+            })
+        end
     end
-}, "Slider_CollectInterval")
+})
 
-MainSections.LeftSection:Divider()
+-- [Menu] Repair
+MainSections.Repair:Header({ Text = "Repair" })
 
-
-
-MainSections.LeftSection:Toggle({
-    Name = "Auto Unlock Land (Tiles)",
-    Default = (State.AutoUnlockLand == true),
-    Callback = function(v)
-        State.AutoUnlockLand = v
-        SaveConfigDebounced()
-    end
-}, "Toggle_AutoUnlockLand")
-
-MainSections.LeftSection:Slider({
-    Name = "Unlock Land Interval (s)",
-    Min = 1,
-    Max = 10,
-    Precision = 0,
-    Default = State.UnlockInterval or 2,
-    Callback = function(v)
-        State.UnlockInterval = v
-        SaveConfigDebounced()
-    end
-}, "Slider_UnlockInterval")
-
-MainSections.LeftSection:Divider()
-
-MainSections.LeftSection:Toggle({
-    Name = "Auto Repair Ruins & Walls",
+MainSections.Repair:Toggle({
+    Name = "Auto Repair",
     Default = (State.AutoRepair == true),
-    Callback = function(v)
-        State.AutoRepair = v
+    Callback = function(val)
+        State.AutoRepair = val
         SaveConfigDebounced()
+        if val then
+            task.spawn(RepairAllRuins)
+        end
     end
 }, "Toggle_AutoRepair")
 
-MainSections.LeftSection:Slider({
-    Name = "Repair Check Interval (s)",
-    Min = 1,
-    Max = 10,
-    Precision = 0,
-    Default = State.RepairInterval or 2,
-    Callback = function(v)
-        State.RepairInterval = v
-        SaveConfigDebounced()
+MainSections.Repair:Button({
+    Name = "Repair All Ruins Now",
+    Callback = function()
+        local count = RepairAllRuins()
+        if Window and Window.Notify then
+            Window:Notify({
+                Title = "Repair",
+                Description = ("Repaired %d destroyed building(s) / wall(s)"):format(count),
+                Lifetime = 3
+            })
+        end
     end
-}, "Slider_RepairInterval")
+})
 
--- Right Column: Quests, Rewards & Manual Actions
-MainSections.RightSection:Header({ Text = "Quests & Reward Automations" })
+-- [Menu] Overview & Plot Statistics
+MainSections.Stats:Header({ Text = "Plot & Economy Overview" })
 
-MainSections.RightSection:Toggle({
-    Name = "Auto Claim Daily Quests",
-    Default = (State.AutoClaimDailyQuests == true),
-    Callback = function(v)
-        State.AutoClaimDailyQuests = v
-        SaveConfigDebounced()
+local StatLabels = {
+    Player = MainSections.Stats:Label({ Text = "Player: " .. tostring(LocalPlayer.Name) }),
+    Plot = MainSections.Stats:Label({ Text = "Plot: Detecting..." }),
+    BaseHp = MainSections.Stats:Label({ Text = "Base Health: 100%" }),
+    Rubble = MainSections.Stats:Label({ Text = "Destroyed Ruins: 0" }),
+    Buildings = MainSections.Stats:Label({ Text = "Buildings: 0" }),
+    Wallet = MainSections.Stats:Label({ Text = "Wallet Cash: $0" })
+}
+
+-- Real-time Overview Stats Updater
+task.spawn(function()
+    while isScriptRunning do
+        task.wait(1.0)
+        if not isScriptRunning then break end
+        pcall(function()
+            local plot = GetPlayerPlot()
+            local plotName = plot and plot.Name or "Not Claimed"
+            local bFolder = plot and plot:FindFirstChild("Buildings")
+            local bCount = bFolder and #bFolder:GetChildren() or 0
+            local wallet = LocalPlayer:GetAttribute("WalletCash") or 0
+            local hp = LocalPlayer:GetAttribute("BaseHealthPercent") or 100
+            local rubbles = GetRubbleList()
+
+            if StatLabels.Plot and StatLabels.Plot.UpdateName then
+                StatLabels.Plot:UpdateName("Active Plot: " .. plotName)
+            end
+            if StatLabels.BaseHp and StatLabels.BaseHp.UpdateName then
+                StatLabels.BaseHp:UpdateName(("Base Health: %d%%"):format(hp))
+            end
+            if StatLabels.Rubble and StatLabels.Rubble.UpdateName then
+                StatLabels.Rubble:UpdateName(("Destroyed Ruins: %d"):format(#rubbles))
+            end
+            if StatLabels.Buildings and StatLabels.Buildings.UpdateName then
+                StatLabels.Buildings:UpdateName(("Buildings: %d"):format(bCount))
+            end
+            if StatLabels.Wallet and StatLabels.Wallet.UpdateName then
+                StatLabels.Wallet:UpdateName(("Wallet Cash: $%s"):format(FormatNumber(wallet)))
+            end
+        end)
     end
-}, "Toggle_AutoClaimDailyQuests")
+end)
 
-MainSections.RightSection:Toggle({
-    Name = "Auto Claim Legacy Milestones",
-    Default = (State.AutoClaimLegacyMilestones == true),
-    Callback = function(v)
-        State.AutoClaimLegacyMilestones = v
+-- ------------------------------------------------------------------------------
+-- TAB 2: QUESTS
+-- ------------------------------------------------------------------------------
+local QuestSections = {
+    Quests = Tabs.Quests:Section({ Side = "Left" }),
+    Status = Tabs.Quests:Section({ Side = "Right" })
+}
+
+-- [Menu] Quests
+QuestSections.Quests:Header({ Text = "Quests" })
+
+QuestSections.Quests:Toggle({
+    Name = "Auto Claim",
+    Default = (State.AutoClaimQuests == true),
+    Callback = function(val)
+        State.AutoClaimQuests = val
         SaveConfigDebounced()
+        if val then
+            task.spawn(ClaimCompletedQuests)
+        end
     end
-}, "Toggle_AutoClaimLegacyMilestones")
+}, "Toggle_AutoClaimQuests")
 
-MainSections.RightSection:Toggle({
-    Name = "Auto Claim Event Gifts",
-    Default = (State.AutoClaimEventGifts == true),
-    Callback = function(v)
-        State.AutoClaimEventGifts = v
-        SaveConfigDebounced()
+QuestSections.Quests:Button({
+    Name = "Claim Completed Quests",
+    Callback = function()
+        local count = ClaimCompletedQuests()
+        if Window and Window.Notify then
+            Window:Notify({
+                Title = "Quests",
+                Description = ("Claimed %d completed quest(s)"):format(count),
+                Lifetime = 3
+            })
+        end
     end
-}, "Toggle_AutoClaimEventGifts")
+})
 
+-- [Menu] Quests Status & Progress
+QuestSections.Status:Header({ Text = "Quests Status & Overview" })
 
+local QuestLabels = {
+    DailyReady = QuestSections.Status:Label({ Text = "Daily Quests Ready: 0" }),
+    LegacyReady = QuestSections.Status:Label({ Text = "Legacy Quests Ready: 0" }),
+    TotalDaily = QuestSections.Status:Label({ Text = "Daily Total: 4" }),
+    TotalLegacy = QuestSections.Status:Label({ Text = "Legacy Total: 8" })
+}
 
--- Select First Tab by default
-pcall(function()
-    if Tabs.Main and Tabs.Main.Select then
-        Tabs.Main:Select()
+-- Real-time Quest Status Updater
+task.spawn(function()
+    while isScriptRunning do
+        task.wait(1.5)
+        if not isScriptRunning then break end
+        pcall(function()
+            if cachedQuestData then
+                local dReady = 0
+                local dTotal = 0
+                if type(cachedQuestData.daily) == "table" then
+                    dTotal = #cachedQuestData.daily
+                    for _, q in ipairs(cachedQuestData.daily) do
+                        if q.done then dReady = dReady + 1 end
+                    end
+                end
+
+                local lReady = 0
+                local lTotal = 0
+                if type(cachedQuestData.legacy) == "table" then
+                    lTotal = #cachedQuestData.legacy
+                    for _, q in ipairs(cachedQuestData.legacy) do
+                        if q.done then lReady = lReady + 1 end
+                    end
+                end
+
+                if QuestLabels.DailyReady and QuestLabels.DailyReady.UpdateName then
+                    QuestLabels.DailyReady:UpdateName(("Daily Quests Ready: %d"):format(dReady))
+                end
+                if QuestLabels.LegacyReady and QuestLabels.LegacyReady.UpdateName then
+                    QuestLabels.LegacyReady:UpdateName(("Legacy Quests Ready: %d"):format(lReady))
+                end
+                if QuestLabels.TotalDaily and QuestLabels.TotalDaily.UpdateName then
+                    QuestLabels.TotalDaily:UpdateName(("Daily Total: %d"):format(dTotal))
+                end
+                if QuestLabels.TotalLegacy and QuestLabels.TotalLegacy.UpdateName then
+                    QuestLabels.TotalLegacy:UpdateName(("Legacy Total: %d"):format(lTotal))
+                end
+            end
+        end)
     end
 end)
 
 -- ==============================================================================
--- 10. UNIVERSAL SETTINGS TAB
+-- 9. UNIVERSAL SETTINGS TAB
 -- ==============================================================================
 local SettingsSections = {
     Controls = Tabs.Settings:Section({ Side = "Left" }),
@@ -1152,39 +1462,68 @@ SettingsSections.Config:Button({
     Name = "Save Config Now",
     Callback = function()
         SaveConfig()
-        Window:Notify({ Title = "Config", Description = "Saved successfully!", Lifetime = 3 })
+        if Window and Window.Notify then
+            Window:Notify({ Title = "Config", Description = "Saved successfully!", Lifetime = 3 })
+        end
     end
 })
 
 local function LoadConfig()
-    if not isfile or not isfile(ConfigFile) then return end
-    local okRead, content = pcall(readfile, ConfigFile)
-    if not okRead or not content or #content < 2 then return end
-    local okParse, data = pcall(function() return HttpService:JSONDecode(content) end)
-    if not okParse or type(data) ~= "table" then return end
-
+    if isLoadingConfig then return end
     isLoadingConfig = true
-    for k, v in pairs(data) do
-        if k == "Keybind" then
-            local bind = ResolveBind(v)
-            if bind then State.Keybind = bind end
-        elseif State[k] ~= nil then
-            State[k] = v
-        end
-    end
+    EnsureFolders()
 
-    -- Update MacLib UI components
-    pcall(function()
-        if MacLib and MacLib.Options then
-            for flag, option in pairs(MacLib.Options) do
-                local stateKey = flag:gsub("^Toggle_", ""):gsub("^Slider_", ""):gsub("^Keybind_", "")
-                if State[stateKey] ~= nil and option.SetValue then
-                    pcall(function() option:SetValue(State[stateKey]) end)
+    local okMain, mainErr = pcall(function()
+        if not (isfile and isfile(ConfigFile)) then return end
+        local content = readfile(ConfigFile)
+        local ok, data = pcall(function() return HttpService:JSONDecode(content) end)
+        if not (ok and type(data) == "table") then return end
+
+        for k, v in pairs(data) do
+            if k == "Keybind" then
+                local bind = ResolveBind(v)
+                if bind and bind ~= Enum.KeyCode.Unknown then
+                    State.Keybind = bind
+                    if Window and Window.SetKeybind then pcall(function() Window:SetKeybind(bind) end) end
+                    if MacLib.Options["Keybind_ToggleUI"] then pcall(function() MacLib.Options["Keybind_ToggleUI"]:Bind(bind) end) end
+                end
+            elseif State[k] ~= nil then
+                State[k] = v
+                if MacLib.Options["Toggle_" .. k] then
+                    pcall(function() MacLib.Options["Toggle_" .. k]:UpdateState(v == true) end)
+                elseif MacLib.Options["Dropdown_" .. k] then
+                    pcall(function() MacLib.Options["Dropdown_" .. k]:UpdateSelection(v) end)
+                elseif MacLib.Options["Slider_" .. k] then
+                    pcall(function() MacLib.Options["Slider_" .. k]:UpdateValue(v) end)
+                elseif MacLib.Options["Input_" .. k] then
+                    pcall(function() MacLib.Options["Input_" .. k]:UpdateText(tostring(v)) end)
                 end
             end
         end
+
+        if data.AcrylicBlur ~= nil and MacLib.Options["Toggle_AcrylicBlur"] then
+            pcall(function()
+                MacLib.Options["Toggle_AcrylicBlur"]:UpdateState(data.AcrylicBlur == true)
+                if Window and Window.SetAcrylicBlurState then Window:SetAcrylicBlurState(data.AcrylicBlur == true) end
+            end)
+        end
+        if data.ShowUserInfo ~= nil and MacLib.Options["Toggle_ShowUserInfo"] then
+            pcall(function()
+                MacLib.Options["Toggle_ShowUserInfo"]:UpdateState(data.ShowUserInfo ~= false)
+                if Window and Window.SetUserInfoState then Window:SetUserInfoState(data.ShowUserInfo ~= false) end
+            end)
+        end
+        if data.MobileToggle ~= nil and MacLib.Options["Toggle_MobileToggle"] then
+            pcall(function()
+                MacLib.Options["Toggle_MobileToggle"]:UpdateState(data.MobileToggle ~= false)
+                if getgenv().STRIX_MOBILE_GUI then getgenv().STRIX_MOBILE_GUI.Enabled = (data.MobileToggle ~= false) end
+            end)
+        end
     end)
 
+    if not okMain and mainErr then
+        warn("[STRIX HUB] LoadConfig error: " .. tostring(mainErr))
+    end
     isLoadingConfig = false
 end
 
@@ -1192,7 +1531,9 @@ SettingsSections.Config:Button({
     Name = "Reload Config",
     Callback = function()
         LoadConfig()
-        Window:Notify({ Title = "Config", Description = "Reloaded config!", Lifetime = 3 })
+        if Window and Window.Notify then
+            Window:Notify({ Title = "Config", Description = "Reloaded config!", Lifetime = 3 })
+        end
     end
 })
 
@@ -1211,64 +1552,61 @@ SettingsSections.Config:Button({
 })
 
 -- ==============================================================================
--- 11. BACKGROUND TASK WORKERS
+-- 10. BACKGROUND WORKERS & LOOPS
 -- ==============================================================================
-
--- Worker 1: Auto Collect Cash
-table.insert(scriptTasks, task.spawn(function()
+-- 1. Cash Auto Collect Loop
+task.spawn(function()
     while isScriptRunning do
+        task.wait(1.0)
+        if not isScriptRunning then break end
         if State.AutoCollectCash then
-            pcall(CollectCashOnce)
+            pcall(CollectCashFromBuildings)
         end
-        task.wait(State.CollectInterval or 1.0)
     end
-end))
+end)
 
-
--- Worker 3: Auto Unlock Land
-table.insert(scriptTasks, task.spawn(function()
+-- 2. Repair Auto Repair Loop
+task.spawn(function()
     while isScriptRunning do
-        if State.AutoUnlockLand then
-            pcall(UnlockLandOnce)
-        end
-        task.wait(State.UnlockInterval or 2.0)
-    end
-end))
-
--- Worker 4: Auto Repair Ruined Buildings & Walls
-table.insert(scriptTasks, task.spawn(function()
-    while isScriptRunning do
+        task.wait(2.0)
+        if not isScriptRunning then break end
         if State.AutoRepair then
-            pcall(RepairRuinsOnce)
+            pcall(RepairAllRuins)
         end
-        task.wait(State.RepairInterval or 2.0)
     end
-end))
+end)
 
--- Worker 5: Quests & Event Gift Polling
-table.insert(scriptTasks, task.spawn(function()
+-- 3. Quests Auto Claim Loop
+task.spawn(function()
     while isScriptRunning do
-        if State.AutoClaimDailyQuests or State.AutoClaimLegacyMilestones then
-            pcall(function()
-                if Remotes.RequestQuestState then
-                    Remotes.RequestQuestState:FireServer()
-                end
-            end)
+        task.wait(2.5)
+        if not isScriptRunning then break end
+        if State.AutoClaimQuests then
+            pcall(ClaimCompletedQuests)
+        else
+            if RequestQuestState then
+                pcall(function() RequestQuestState:FireServer() end)
+            end
         end
-        if State.AutoClaimEventGifts then
-            pcall(ClaimEventGiftOnce)
-        end
-        task.wait(State.QuestsPollInterval or 5.0)
     end
-end))
+end)
 
--- Worker 6: Periodic Auto Save Config (Every 10 seconds)
-table.insert(scriptTasks, task.spawn(function()
-    while isScriptRunning do
-        task.wait(10)
-        pcall(SaveConfig)
+-- Initial Load Config & Select First Tab
+LoadConfig()
+pcall(function()
+    if Tabs.Main and Tabs.Main.Select then
+        Tabs.Main:Select()
     end
-end))
+end)
 
+-- Global Hub Registry
+getgenv().STRIX_HUB = {
+    Window = Window,
+    Tabs = Tabs,
+    State = State,
+    SaveConfig = SaveConfig,
+    LoadConfig = LoadConfig
+}
+getgenv().STRIX_HUB_JOB_ID = game.JobId
 
 print("[STRIX HUB] Mini City Wars script loaded successfully!")
