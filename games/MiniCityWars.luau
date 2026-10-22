@@ -122,11 +122,37 @@ local Remotes = ReplicatedStorage:WaitForChild("Remotes", 25)
 -- Economy Remotes
 local EconomyRemotes = Remotes and Remotes:WaitForChild("Economy", 15)
 local CollectRequest = EconomyRemotes and EconomyRemotes:WaitForChild("CollectRequest", 15)
+local CiviliansUpdated = EconomyRemotes and EconomyRemotes:WaitForChild("CiviliansUpdated", 15)
 
--- Building Remotes (Repair System)
+-- Building Remotes (Repair & Shop System)
 local BuildingRemotes = Remotes and Remotes:WaitForChild("Building", 15)
 local RequestRepairBuilding = BuildingRemotes and BuildingRemotes:WaitForChild("RequestRepairBuilding", 15)
 local RepairResult = BuildingRemotes and BuildingRemotes:WaitForChild("RepairResult", 15)
+local BuyToInventory = BuildingRemotes and BuildingRemotes:WaitForChild("BuyToInventory", 15)
+local BuyResult = BuildingRemotes and BuildingRemotes:WaitForChild("BuyResult", 15)
+local StockUpdated = BuildingRemotes and BuildingRemotes:WaitForChild("StockUpdated", 15)
+local RequestStock = BuildingRemotes and BuildingRemotes:WaitForChild("RequestStock", 15)
+
+-- Building Catalog
+local BuildingCatalog = nil
+pcall(function()
+    BuildingCatalog = require(ReplicatedStorage:WaitForChild("Catalogs"):WaitForChild("BuildingCatalog"))
+end)
+
+-- Research Remotes
+local ResearchRemotes = Remotes and Remotes:WaitForChild("Research", 15)
+local RequestResearch = ResearchRemotes and ResearchRemotes:WaitForChild("RequestResearch", 15)
+local RequestResearchState = ResearchRemotes and ResearchRemotes:WaitForChild("RequestResearchState", 15)
+local ResearchResult = ResearchRemotes and ResearchRemotes:WaitForChild("ResearchResult", 15)
+local ResearchState = ResearchRemotes and ResearchRemotes:WaitForChild("ResearchState", 15)
+
+-- Research Catalog & HexGrid
+local ResearchConfig = nil
+local HexGrid = nil
+pcall(function()
+    ResearchConfig = require(ReplicatedStorage:WaitForChild("UI"):WaitForChild("ResearchConfig"))
+    HexGrid = require(ReplicatedStorage:WaitForChild("UI"):WaitForChild("HexGrid"))
+end)
 
 -- Quests Remotes
 local QuestsRemotes = Remotes and Remotes:WaitForChild("Quests", 15)
@@ -305,6 +331,395 @@ local function ClaimCompletedQuests()
     end
 
     return claimedCount
+end
+
+-- ==============================================================================
+-- RESEARCH SYSTEM CACHE & HELPERS
+-- ==============================================================================
+local cachedResearchOwned = {}
+local cachedResearchJobs = {}
+local cachedResearchersMax = 1
+local lastResearchAttemptTime = 0
+local lastResearchAttemptId = nil
+local lastResearchResult = { success = nil, msg = "", timestamp = 0 }
+
+local function UpdateResearchState(data)
+    if type(data) ~= "table" then return end
+    table.clear(cachedResearchOwned)
+    for _, id in ipairs(data.owned or {}) do
+        cachedResearchOwned[id] = true
+    end
+
+    table.clear(cachedResearchJobs)
+    if type(data.jobs) == "table" then
+        for k, v in pairs(data.jobs) do
+            if type(v) == "table" and v.id then
+                cachedResearchJobs[v.id] = v
+            elseif type(k) == "string" then
+                cachedResearchJobs[k] = v
+            end
+        end
+    end
+
+    if type(data.researchers) == "number" then
+        cachedResearchersMax = data.researchers
+    end
+end
+
+if ResearchState then
+    ResearchState.OnClientEvent:Connect(function(data)
+        UpdateResearchState(data)
+    end)
+    task.defer(function()
+        if RequestResearchState then
+            pcall(function() RequestResearchState:FireServer() end)
+        end
+    end)
+end
+
+if ResearchResult then
+    ResearchResult.OnClientEvent:Connect(function(success, nodeId, msg)
+        lastResearchResult.success = (success == true)
+        lastResearchResult.msg = tostring(msg or "")
+        lastResearchResult.timestamp = os.clock()
+        if RequestResearchState then
+            task.delay(0.5, function()
+                pcall(function() RequestResearchState:FireServer() end)
+            end)
+        end
+    end)
+end
+
+local function GetActiveResearchJobCount()
+    local count = 0
+    for _ in pairs(cachedResearchJobs) do
+        count = count + 1
+    end
+    return count
+end
+
+local function GetOwnedResearchCount()
+    local count = 0
+    for _ in pairs(cachedResearchOwned) do
+        count = count + 1
+    end
+    return count
+end
+
+local function GetAvailableResearchNodes()
+    if not ResearchConfig or not ResearchConfig.NODES or not HexGrid then return {} end
+
+    local available = {}
+    for _, node in ipairs(ResearchConfig.NODES) do
+        if not cachedResearchOwned[node.id] and not cachedResearchJobs[node.id] and node.live == true then
+            -- 1. Check prerequisites
+            local reqsMet = true
+            for _, reqId in ipairs(node.requires or {}) do
+                if not cachedResearchOwned[reqId] then
+                    reqsMet = false
+                    break
+                end
+            end
+
+            if reqsMet then
+                -- 2. Check hex distance <= 1 to any owned node, or is ORIGIN
+                local isConnected = (node.id == ResearchConfig.ORIGIN)
+                if not isConnected then
+                    for ownedId in pairs(cachedResearchOwned) do
+                        local ownedNode = ResearchConfig.BY_ID and ResearchConfig.BY_ID[ownedId]
+                        if ownedNode and HexGrid.distance(node.q, node.r, ownedNode.q, ownedNode.r) <= 1 then
+                            isConnected = true
+                            break
+                        end
+                    end
+                end
+
+                if isConnected then
+                    table.insert(available, {
+                        id = node.id,
+                        name = node.name or node.id,
+                        cost = tonumber(node.cost) or 0,
+                        time = tonumber(node.time) or 0
+                    })
+                end
+            end
+        end
+    end
+
+    -- Sort by cost ascending, then by time ascending
+    table.sort(available, function(a, b)
+        if a.cost ~= b.cost then
+            return a.cost < b.cost
+        end
+        return a.time < b.time
+    end)
+
+    return available
+end
+
+local function UpgradeNextResearch()
+    if not RequestResearch then return false, "RequestResearch remote unavailable" end
+
+    local activeJobs = GetActiveResearchJobCount()
+    if activeJobs >= cachedResearchersMax then
+        return false, ("All research slots full (%d/%d)"):format(activeJobs, cachedResearchersMax)
+    end
+
+    if (os.clock() - lastResearchAttemptTime) < 1.0 then
+        return false, "Cooldown"
+    end
+
+    local currentCash = LocalPlayer:GetAttribute("WalletCash")
+    if type(currentCash) ~= "number" then
+        currentCash = 0
+        local ls = LocalPlayer:FindFirstChild("leaderstats")
+        local cashVal = ls and ls:FindFirstChild("Cash")
+        if cashVal and tonumber(cashVal.Value) then
+            currentCash = tonumber(cashVal.Value)
+        end
+    end
+
+    local availableList = GetAvailableResearchNodes()
+    if #availableList == 0 then
+        return false, "No research nodes currently available"
+    end
+
+    for _, item in ipairs(availableList) do
+        if currentCash >= item.cost then
+            lastResearchAttemptTime = os.clock()
+            lastResearchAttemptId = item.id
+            pcall(function()
+                RequestResearch:FireServer(item.id)
+            end)
+            cachedResearchJobs[item.id] = { id = item.id, optimistic = true }
+            return true, item.name
+        end
+    end
+
+    local cheapest = availableList[1]
+    return false, ("Need $%s for %s"):format(FormatNumber(cheapest.cost), cheapest.name)
+end
+
+-- ==============================================================================
+-- SHOP & BUILDING CATALOG CLASSIFICATION & HELPERS
+-- ==============================================================================
+local ShopCategories = {
+    residential = {},
+    offices = {},
+    military = {},
+    misc = {}
+}
+
+local ShopCategoryOptions = {
+    residential = {},
+    offices = {},
+    military = {},
+    misc = {}
+}
+
+local categoryMap = {
+    house = "residential",
+    office = "offices",
+    farm = "offices",
+    mine = "offices",
+    premium = "offices",
+    military = "military",
+    civic = "misc",
+    recreational = "misc",
+    decoration = "misc"
+}
+
+local function InitShopCatalog()
+    if not BuildingCatalog or not BuildingCatalog.DEFS then return end
+    for catKey, _ in pairs(ShopCategories) do
+        table.clear(ShopCategories[catKey])
+        table.clear(ShopCategoryOptions[catKey])
+    end
+
+    for _, def in pairs(BuildingCatalog.DEFS) do
+        local group = categoryMap[def.category]
+        if group and not def.robuxOnly and not def.exclusive then
+            local cost = tonumber(def.cost) or 0
+            if cost > 0 then
+                local name = def.displayName or def.name or tostring(def.id)
+                local label = ("%s ($%s)"):format(name, FormatNumber(cost))
+                table.insert(ShopCategories[group], {
+                    id = tostring(def.id),
+                    name = name,
+                    label = label,
+                    cost = cost,
+                    category = def.category,
+                    unlockPop = tonumber(def.unlockPop) or 0
+                })
+            end
+        end
+    end
+
+    for group, list in pairs(ShopCategories) do
+        table.sort(list, function(a, b)
+            return a.cost < b.cost
+        end)
+        for _, item in ipairs(list) do
+            table.insert(ShopCategoryOptions[group], item.label)
+        end
+    end
+end
+InitShopCatalog()
+
+-- Stock & Shop Live Cache
+local cachedStocks = {}
+local cachedRestockTimer = 0
+local cachedCivilians = 9999
+local lastPurchaseResult = { success = nil, msg = "None", itemName = "", timestamp = 0 }
+local failedItemCooldowns = {}
+local lastAttemptedItemId = nil
+
+if StockUpdated then
+    StockUpdated.OnClientEvent:Connect(function(stocks, restockTime)
+        if type(stocks) == "table" then
+            cachedStocks = stocks
+        end
+        if type(restockTime) == "number" then
+            cachedRestockTimer = restockTime
+        end
+    end)
+    task.defer(function()
+        if RequestStock then
+            pcall(function() RequestStock:FireServer() end)
+        end
+    end)
+end
+
+if CiviliansUpdated then
+    CiviliansUpdated.OnClientEvent:Connect(function(curCiv, maxCiv)
+        if type(curCiv) == "number" then
+            cachedCivilians = curCiv
+        end
+    end)
+end
+
+if BuyResult then
+    BuyResult.OnClientEvent:Connect(function(success, msg)
+        lastPurchaseResult.success = (success == true)
+        lastPurchaseResult.msg = tostring(msg or "")
+        lastPurchaseResult.timestamp = os.clock()
+        if lastAttemptedItemId then
+            if success == true then
+                failedItemCooldowns[lastAttemptedItemId] = nil
+            else
+                failedItemCooldowns[lastAttemptedItemId] = os.clock() + 20
+            end
+        end
+    end)
+end
+
+-- Helper: Count selected items (supports both array and dictionary format)
+local function GetSelectedCount(tbl)
+    if type(tbl) ~= "table" then return 0 end
+    local count = 0
+    for k, v in pairs(tbl) do
+        if v == true or type(k) == "number" then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+-- Helper: Check if item is selected in the category selection table
+local function IsItemSelected(selectedTbl, item)
+    if type(selectedTbl) ~= "table" then return false end
+    for k, v in pairs(selectedTbl) do
+        local optName = (type(k) == "number") and v or (v == true and k or nil)
+        if optName and (optName == item.label or optName == item.name or optName == item.id) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Helper: Buy Next Available Item for Category
+local function BuyNextBuilding(catKey)
+    if not BuyToInventory then return false end
+    local list = ShopCategories[catKey]
+    if not list or #list == 0 then return false end
+
+    local selectedList = nil
+    if catKey == "residential" then
+        selectedList = State.SelectedResidential
+    elseif catKey == "offices" then
+        selectedList = State.SelectedOffices
+    elseif catKey == "military" then
+        selectedList = State.SelectedMilitary
+    elseif catKey == "misc" then
+        selectedList = State.SelectedMisc
+    end
+
+    local selCount = GetSelectedCount(selectedList)
+    if selCount == 0 and not State.BuyAllIfNoneSelected then
+        -- User has not selected any items in this category and fallback buy-all is off
+        return false
+    end
+
+    local currentCash = LocalPlayer:GetAttribute("WalletCash") or 0
+    local minReserve = tonumber(State.KeepCashReserve) or 0
+
+    for _, item in ipairs(list) do
+        if not isScriptRunning then break end
+
+        -- If specific items are selected, only buy those items
+        if selCount > 0 and not IsItemSelected(selectedList, item) then
+            continue
+        end
+
+        -- 1. Check if temporary blacklist cooldown
+        if failedItemCooldowns[item.id] and os.clock() < failedItemCooldowns[item.id] then
+            continue
+        end
+
+        -- 2. Check stock limit
+        if cachedStocks[item.id] ~= nil and cachedStocks[item.id] <= 0 then
+            continue
+        end
+
+        -- 3. Check civilian requirement
+        if item.unlockPop and item.unlockPop > 0 and cachedCivilians < item.unlockPop then
+            continue
+        end
+
+        -- 4. Check if player has enough cash considering reserve
+        if (currentCash - item.cost) < minReserve then
+            -- Can't afford this item
+            break
+        end
+
+        -- 5. Fire purchase
+        lastAttemptedItemId = item.id
+        lastPurchaseResult.itemName = item.name
+        if cachedStocks[item.id] and cachedStocks[item.id] > 0 then
+            cachedStocks[item.id] = cachedStocks[item.id] - 1
+        end
+
+        pcall(function()
+            BuyToInventory:FireServer(item.id, false, 1)
+        end)
+        return true, item
+    end
+
+    return false
+end
+
+-- Helper: Count items in stock for category
+local function GetInStockCount(catKey)
+    local list = ShopCategories[catKey]
+    if not list then return 0 end
+    local count = 0
+    for _, item in ipairs(list) do
+        local stock = cachedStocks[item.id]
+        if stock == nil or stock > 0 then
+            count = count + 1
+        end
+    end
+    return count
 end
 
 -- ==============================================================================
@@ -517,8 +932,24 @@ local State = {
     -- Repair Automation
     AutoRepair = false,
 
+    -- Research Automation
+    AutoUpgradeResearch = false,
+
     -- Quests Automation
     AutoClaimQuests = false,
+
+    -- Shop Automation
+    AutoBuyResidential = false,
+    AutoBuyOffices = false,
+    AutoBuyMilitary = false,
+    AutoBuyMisc = false,
+    SelectedResidential = {},
+    SelectedOffices = {},
+    SelectedMilitary = {},
+    SelectedMisc = {},
+    BuyAllIfNoneSelected = false,
+    BuyInterval = 1.5,
+    KeepCashReserve = 10000,
 
     -- Interface Settings
     Keybind = Enum.KeyCode.RightControl,
@@ -1201,6 +1632,7 @@ local TabGroup = Window:TabGroup()
 
 local Tabs = {
     Main = TabGroup:Tab({ Name = "Main", Image = "rbxassetid://10709782230" }), -- lucide-home
+    Shop = TabGroup:Tab({ Name = "Shop", Image = "rbxassetid://10734952479" }), -- lucide-shopping-cart
     Quests = TabGroup:Tab({ Name = "Quests", Image = "rbxassetid://10734966248" }), -- lucide-star
     Settings = TabGroup:Tab({ Name = "Settings", Image = "rbxassetid://10734950309" }) -- lucide-settings
 }
@@ -1211,6 +1643,7 @@ local Tabs = {
 local MainSections = {
     Cash = Tabs.Main:Section({ Side = "Left" }),
     Repair = Tabs.Main:Section({ Side = "Left" }),
+    Research = Tabs.Main:Section({ Side = "Left" }),
     Stats = Tabs.Main:Section({ Side = "Right" })
 }
 
@@ -1269,6 +1702,46 @@ MainSections.Repair:Button({
     end
 })
 
+-- [Menu] Research
+MainSections.Research:Header({ Text = "Research" })
+
+MainSections.Research:Toggle({
+    Name = "Auto Upgrade Research",
+    Default = (State.AutoUpgradeResearch == true),
+    Callback = function(val)
+        State.AutoUpgradeResearch = val
+        SaveConfigDebounced()
+        if val then
+            task.spawn(UpgradeNextResearch)
+        end
+    end
+}, "Toggle_AutoUpgradeResearch")
+
+local ResearchSlotsLabel = MainSections.Research:Label({ Text = "Researchers: 0/1 Active" })
+local NextTechLabel = MainSections.Research:Label({ Text = "Next Tech: Detecting..." })
+
+MainSections.Research:Button({
+    Name = "Upgrade Next Research Now",
+    Callback = function()
+        local success, result = UpgradeNextResearch()
+        if Window and Window.Notify then
+            if success then
+                Window:Notify({
+                    Title = "Research Started",
+                    Description = ("Started research: %s"):format(tostring(result)),
+                    Lifetime = 3
+                })
+            else
+                Window:Notify({
+                    Title = "Research",
+                    Description = tostring(result or "Unable to upgrade research"),
+                    Lifetime = 3
+                })
+            end
+        end
+    end
+})
+
 -- [Menu] Overview & Plot Statistics
 MainSections.Stats:Header({ Text = "Plot & Economy Overview" })
 
@@ -1278,7 +1751,8 @@ local StatLabels = {
     BaseHp = MainSections.Stats:Label({ Text = "Base Health: 100%" }),
     Rubble = MainSections.Stats:Label({ Text = "Destroyed Ruins: 0" }),
     Buildings = MainSections.Stats:Label({ Text = "Buildings: 0" }),
-    Wallet = MainSections.Stats:Label({ Text = "Wallet Cash: $0" })
+    Wallet = MainSections.Stats:Label({ Text = "Wallet Cash: $0" }),
+    ResearchCount = MainSections.Stats:Label({ Text = "Techs Researched: 0" })
 }
 
 -- Real-time Overview Stats Updater
@@ -1310,12 +1784,123 @@ task.spawn(function()
             if StatLabels.Wallet and StatLabels.Wallet.UpdateName then
                 StatLabels.Wallet:UpdateName(("Wallet Cash: $%s"):format(FormatNumber(wallet)))
             end
+            if StatLabels.ResearchCount and StatLabels.ResearchCount.UpdateName then
+                StatLabels.ResearchCount:UpdateName(("Techs Researched: %d"):format(GetOwnedResearchCount()))
+            end
+
+            if ResearchSlotsLabel and ResearchSlotsLabel.UpdateName then
+                ResearchSlotsLabel:UpdateName(("Researchers: %d/%d Active"):format(GetActiveResearchJobCount(), cachedResearchersMax))
+            end
+
+            if NextTechLabel and NextTechLabel.UpdateName then
+                local available = GetAvailableResearchNodes()
+                local nextTechText = "All Unlocked"
+                if #available > 0 then
+                    local nextTech = available[1]
+                    nextTechText = ("%s ($%s)"):format(nextTech.name, FormatNumber(nextTech.cost))
+                end
+                NextTechLabel:UpdateName("Next Tech: " .. nextTechText)
+            end
         end)
     end
 end)
 
 -- ------------------------------------------------------------------------------
--- TAB 2: QUESTS
+-- TAB 2: SHOP
+-- ------------------------------------------------------------------------------
+local ShopSections = {
+    AutoBuy = Tabs.Shop:Section({ Side = "Left" })
+}
+
+-- [Menu] Auto Buy
+ShopSections.AutoBuy:Header({ Text = "Auto Buy" })
+
+ShopSections.AutoBuy:Toggle({
+    Name = "Auto Buy Residential",
+    Default = (State.AutoBuyResidential == true),
+    Callback = function(val)
+        State.AutoBuyResidential = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_AutoBuyResidential")
+
+ShopSections.AutoBuy:Dropdown({
+    Name = "Select Residential Items",
+    Search = true,
+    Multi = true,
+    Options = ShopCategoryOptions.residential,
+    Default = State.SelectedResidential or {},
+    Callback = function(selected)
+        State.SelectedResidential = (type(selected) == "table") and selected or {}
+        SaveConfigDebounced()
+    end
+}, "Dropdown_SelectedResidential")
+
+ShopSections.AutoBuy:Toggle({
+    Name = "Auto Buy Offices",
+    Default = (State.AutoBuyOffices == true),
+    Callback = function(val)
+        State.AutoBuyOffices = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_AutoBuyOffices")
+
+ShopSections.AutoBuy:Dropdown({
+    Name = "Select Offices Items",
+    Search = true,
+    Multi = true,
+    Options = ShopCategoryOptions.offices,
+    Default = State.SelectedOffices or {},
+    Callback = function(selected)
+        State.SelectedOffices = (type(selected) == "table") and selected or {}
+        SaveConfigDebounced()
+    end
+}, "Dropdown_SelectedOffices")
+
+ShopSections.AutoBuy:Toggle({
+    Name = "Auto Buy Military",
+    Default = (State.AutoBuyMilitary == true),
+    Callback = function(val)
+        State.AutoBuyMilitary = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_AutoBuyMilitary")
+
+ShopSections.AutoBuy:Dropdown({
+    Name = "Select Military Items",
+    Search = true,
+    Multi = true,
+    Options = ShopCategoryOptions.military,
+    Default = State.SelectedMilitary or {},
+    Callback = function(selected)
+        State.SelectedMilitary = (type(selected) == "table") and selected or {}
+        SaveConfigDebounced()
+    end
+}, "Dropdown_SelectedMilitary")
+
+ShopSections.AutoBuy:Toggle({
+    Name = "Auto Buy Miscellaneous",
+    Default = (State.AutoBuyMisc == true),
+    Callback = function(val)
+        State.AutoBuyMisc = val
+        SaveConfigDebounced()
+    end
+}, "Toggle_AutoBuyMisc")
+
+ShopSections.AutoBuy:Dropdown({
+    Name = "Select Miscellaneous Items",
+    Search = true,
+    Multi = true,
+    Options = ShopCategoryOptions.misc,
+    Default = State.SelectedMisc or {},
+    Callback = function(selected)
+        State.SelectedMisc = (type(selected) == "table") and selected or {}
+        SaveConfigDebounced()
+    end
+}, "Dropdown_SelectedMisc")
+
+-- ------------------------------------------------------------------------------
+-- TAB 3: QUESTS
 -- ------------------------------------------------------------------------------
 local QuestSections = {
     Quests = Tabs.Quests:Section({ Side = "Left" }),
@@ -1576,7 +2161,25 @@ task.spawn(function()
     end
 end)
 
--- 3. Quests Auto Claim Loop
+-- 3. Research Auto Upgrade Loop
+task.spawn(function()
+    local lastRefresh = 0
+    while isScriptRunning do
+        task.wait(2.5)
+        if not isScriptRunning then break end
+        if State.AutoUpgradeResearch then
+            pcall(UpgradeNextResearch)
+        end
+        if (os.clock() - lastRefresh) > 15 then
+            lastRefresh = os.clock()
+            if RequestResearchState then
+                pcall(function() RequestResearchState:FireServer() end)
+            end
+        end
+    end
+end)
+
+-- 4. Quests Auto Claim Loop
 task.spawn(function()
     while isScriptRunning do
         task.wait(2.5)
@@ -1587,6 +2190,51 @@ task.spawn(function()
             if RequestQuestState then
                 pcall(function() RequestQuestState:FireServer() end)
             end
+        end
+    end
+end)
+
+-- 4. Shop Auto Buy Loop
+task.spawn(function()
+    while isScriptRunning do
+        local interval = tonumber(State.BuyInterval) or 1.5
+        if interval < 0.3 then interval = 0.3 end
+        task.wait(interval)
+        if not isScriptRunning then break end
+
+        local anyBuyActive = State.AutoBuyResidential or State.AutoBuyOffices or State.AutoBuyMilitary or State.AutoBuyMisc
+        if anyBuyActive then
+            if State.AutoBuyResidential then
+                pcall(function() BuyNextBuilding("residential") end)
+            end
+            if State.AutoBuyOffices then
+                pcall(function() BuyNextBuilding("offices") end)
+            end
+            if State.AutoBuyMilitary then
+                pcall(function() BuyNextBuilding("military") end)
+            end
+            if State.AutoBuyMisc then
+                pcall(function() BuyNextBuilding("misc") end)
+            end
+        end
+
+        -- Countdown restock timer
+        if cachedRestockTimer > 0 then
+            cachedRestockTimer = math.max(0, cachedRestockTimer - interval)
+            if cachedRestockTimer <= 0 and RequestStock then
+                pcall(function() RequestStock:FireServer() end)
+            end
+        end
+    end
+end)
+
+-- 5. Periodic Shop Stock Refresh Loop
+task.spawn(function()
+    while isScriptRunning do
+        task.wait(25)
+        if not isScriptRunning then break end
+        if RequestStock then
+            pcall(function() RequestStock:FireServer() end)
         end
     end
 end)
